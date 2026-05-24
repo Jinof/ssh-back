@@ -1,0 +1,674 @@
+meta:
+  title "ssh-back System Promise"
+  domain ssh_back
+  version v1
+  status active
+  owner product
+  owner engineering
+  summary "Canonical System Promise for ssh-back, a tool that bridges remote SSH development login flows to the local browser."
+  source "human prompt 2026-05-20"
+
+intent SshBackSystemIntent priority must:
+  statement "ssh-back must make remote SSH development browser-login flows work through the local browser without requiring users to hand-build callback tunnels."
+  rationale "Remote development tools often start an OAuth or SSO login that assumes a local browser and localhost callback; ssh-back owns the missing bridge."
+  status active
+  root true
+  source "human prompt 2026-05-20"
+  maps SshTargetFieldPromise relation constrains note "Target configuration is the entry point for managed SSH."
+  maps SshConfigHostFieldPromise relation constrains note "SSH config Host entries are explicit selectable connection targets."
+  maps SshSessionFieldPromise relation constrains note "Session truth records whether SSH, the control tunnel, and browser injection are ready."
+  maps TunnelFieldPromise relation constrains note "Every SSH port forward must be explicit and typed by direction and purpose."
+  maps BrowserOpenRequestFieldPromise relation constrains note "Remote browser-open attempts become recorded requests before any browser launch."
+  maps BrowserOpenHookFieldPromise relation constrains note "Browser-open hooks can intercept a request before local side effects."
+  maps MenuBarAppFieldPromise relation constrains note "The macOS menu bar app is the primary user-facing control surface."
+  maps StartManagedSessionFunctionPromise relation motivates note "Session startup creates the bridge needed by remote browser shims."
+  maps ResolveCallbackTunnelFunctionPromise relation motivates note "Callback tunnel creation is the core automatic behavior."
+  maps EvaluateBrowserOpenHooksFunctionPromise relation motivates note "Hook evaluation gates browser-open requests before callback tunneling and launch."
+  maps BridgeTestEndpointFunctionPromise relation motivates note "A manual test endpoint proves the remote-to-local control bridge is reachable."
+  maps LaunchMenuBarAppFunctionPromise relation motivates note "The menu bar process exposes the always-available local control surface."
+  maps LoadSshConfigHostsFunctionPromise relation motivates note "Reading ~/.ssh/config populates selectable Host aliases."
+  maps BrowserLoginBridgeVerification relation verifies note "The end-to-end login bridge proves the system intent."
+
+intent KeepSshStateExplicit priority must:
+  statement "SSH process state, control bridge state, and browser shim state must be explicit session truth."
+  rationale "If these states live only in process handles or shell setup, later implementation cannot reason about recovery or rejection paths."
+  status active
+  source "human prompt 2026-05-20"
+  parent SshBackSystemIntent relation refines note "Explicit session truth is one branch of the system-level intent."
+  maps SshSessionFieldPromise relation constrains
+  maps SshSession.ready_requires_control_bridge relation constrains
+  maps SshSession.no_untracked_ssh_process relation constrains
+  maps StartManagedSessionFunctionPromise relation motivates
+  maps SessionStartupVerification relation verifies
+
+intent KeepTunnelsIntentional priority must:
+  statement "ssh-back must create only declared SSH tunnels with known direction, purpose, ports, and owning session."
+  rationale "Automatic port forwarding is useful only when it stays observable and bounded."
+  status active
+  source "human prompt 2026-05-20"
+  parent SshBackSystemIntent relation refines note "Tunnel governance is one branch of the system-level intent."
+  maps TunnelFieldPromise relation constrains
+  maps Tunnel.open_requires_opened_at relation constrains
+  maps Tunnel.no_implicit_forward relation constrains
+  maps ResolveCallbackTunnelFunctionPromise relation motivates
+  maps TunnelBoundaryVerification relation verifies
+
+intent LaunchBrowserOnlyAfterCallbackBridge priority must:
+  statement "A remote browser-open request must not launch the local browser until ssh-back has parsed a loopback callback port and opened the matching local-to-remote tunnel."
+  rationale "Opening the browser before the callback path exists produces flaky login flows and hides the failed bridge."
+  status active
+  source "human prompt 2026-05-20"
+  parent SshBackSystemIntent relation refines note "Browser launch ordering protects the user-facing login path."
+  maps BrowserOpenRequestFieldPromise relation constrains
+  maps BrowserOpenRequest.open_requires_callback_tunnel relation constrains
+  maps ReceiveBrowserOpenRequestFunctionPromise relation motivates
+  maps EvaluateBrowserOpenHooksFunctionPromise relation motivates
+  maps LaunchLocalBrowserFunctionPromise relation motivates
+  maps BrowserLoginBridgeVerification relation verifies
+  maps RejectionBoundaryVerification relation verifies
+
+intent RunAsMacMenuBarTool priority must:
+  statement "ssh-back must run as a macOS menu bar tool that exposes session control without requiring a normal Dock window."
+  rationale "The bridge is ambient infrastructure for remote development, so it should stay available from the system menu bar while work continues elsewhere."
+  status active
+  source "human prompt 2026-05-20"
+  parent SshBackSystemIntent relation refines note "The macOS menu bar surface is the user-facing delivery shape."
+  maps MenuBarAppFieldPromise relation constrains
+  maps MenuBarApp.connected_requires_active_session relation constrains
+  maps LaunchMenuBarAppFunctionPromise relation motivates
+  maps LoadSshConfigHostsFunctionPromise relation motivates
+  maps MenuBarStartSessionFunctionPromise relation motivates
+  maps MenuBarStartSshConfigHostFunctionPromise relation motivates
+  maps CopyBrowserShimCommandFunctionPromise relation motivates
+  maps MenuBarSurfaceVerification relation verifies
+
+intent ConnectFromSshConfig priority must:
+  statement "ssh-back must let the user connect through Host aliases read from ~/.ssh/config."
+  rationale "The user already models development machines in OpenSSH config, and ssh-back should use that source instead of requiring duplicate target entry."
+  status active
+  source "human prompt 2026-05-21"
+  parent SshBackSystemIntent relation refines note "SSH config discovery is one branch of the connection workflow."
+  maps SshConfigHostFieldPromise relation constrains
+  maps SshConfigHost.no_credentials_from_config relation constrains
+  maps LoadSshConfigHostsFunctionPromise relation motivates
+  maps MenuBarStartSshConfigHostFunctionPromise relation motivates
+  maps SshConfigHostVerification relation verifies
+
+type TargetName kind id base string:
+  summary "Stable local name for an SSH target."
+  format host-alias
+  generated false
+
+type SshConfigPath kind path base path:
+  summary "Filesystem path to an OpenSSH client config file."
+  format local-path
+  generated false
+
+type RemotePath kind path base path:
+  summary "Filesystem path on the remote development machine."
+  format remote-path
+  generated false
+
+type SessionID kind id base string:
+  summary "Stable identity for one managed SSH session."
+  format opaque
+  generated true
+
+type TunnelID kind id base string:
+  summary "Stable identity for one managed SSH tunnel."
+  format opaque
+  generated true
+
+type BrowserRequestID kind id base string:
+  summary "Stable identity for one remote browser-open request."
+  format opaque
+  generated true
+
+type PortNumber kind network base integer:
+  summary "TCP port number used by a local or remote listener."
+  format tcp-port
+  generated false
+
+type UrlString kind url base text:
+  summary "Absolute URL that a remote process asks the user to open."
+  format absolute-url
+  generated false
+
+type HookName kind id base string:
+  summary "Stable name for a browser-open hook."
+  format human-readable
+  generated false
+
+field SshTargetFieldPromise for SshTarget:
+  summary "Defines SSH target configuration that ssh-back is allowed to manage."
+  field name type TargetName required true nullable false default null semantic "User-facing SSH target name." mutable false system false readers * writers user.configure
+  field sshDestination type string required true nullable false default null semantic "Destination accepted by ssh, such as host alias, user@host, or a configured SSH target." mutable true system false readers * writers user.configure
+  field sshArgs type json required false nullable false default empty-list semantic "Additional SSH arguments that do not change ssh-back business semantics." mutable true system false readers * writers user.configure
+  field defaultRemoteHost type string required true nullable false default 127.0.0.1 semantic "Remote loopback host used when callback URLs omit an explicit remote callback host." mutable true system false readers * writers user.configure
+  field createdAt type datetime required true nullable false default system-generated semantic "Time the target configuration was created." mutable false system true readers * writers system.create
+  field updatedAt type datetime required true nullable false default system-generated semantic "Time the target configuration was last changed." mutable true system true readers * writers system.maintain
+  invariant SshTarget.created_at_immutable statement "SshTarget.createdAt cannot be changed after target creation." refs SshTarget.createdAt
+  constraint SshTarget.destination_required statement "sshDestination must be present before a managed session can start." refs SshTarget.sshDestination
+  constraint SshTarget.ssh_args_are_transport_only statement "sshArgs may tune transport behavior but must not become hidden business state." refs SshTarget.sshArgs
+  forbid SshTarget.no_stored_password statement "SshTarget must not store SSH passwords, OAuth tokens, or browser session credentials." refs SshTarget.sshDestination,SshTarget.sshArgs
+
+field SshConfigHostFieldPromise for SshConfigHost:
+  summary "Defines a selectable Host entry loaded from an OpenSSH client config file."
+  field alias type TargetName required true nullable false default null semantic "Host alias from an OpenSSH Host directive and the value passed to ssh for connection." mutable false system false readers * writers system.loadSshConfig
+  field sourcePath type SshConfigPath required true nullable false default "~/.ssh/config" semantic "Config file path that provided the Host alias." mutable false system true readers * writers system.loadSshConfig
+  field hostName type string required false nullable true default null semantic "Optional HostName option displayed for user context; ssh-back still connects using alias so OpenSSH remains authoritative." mutable false system false readers * writers system.loadSshConfig
+  field user type string required false nullable true default null semantic "Optional User option displayed for user context." mutable false system false readers * writers system.loadSshConfig
+  field port type PortNumber required false nullable true default null semantic "Optional Port option displayed for user context." mutable false system false readers * writers system.loadSshConfig
+  field connectable type boolean required true nullable false default true semantic "Whether the Host alias is concrete enough for a menu connection action." mutable false system true readers * writers system.loadSshConfig
+  field loadedAt type datetime required true nullable false default system-generated semantic "Time ssh-back loaded this Host entry." mutable false system true readers * writers system.loadSshConfig
+  invariant SshConfigHost.connectable_requires_alias statement "A connectable SSH config host must have an alias." refs SshConfigHost.connectable,SshConfigHost.alias when "SshConfigHost.connectable == true" must "SshConfigHost.alias != null"
+  constraint SshConfigHost.no_wildcard_connection statement "Host patterns containing wildcards are discoverable context but not connectable menu targets in the MVP." refs SshConfigHost.alias,SshConfigHost.connectable
+  constraint SshConfigHost.open_ssh_remains_authoritative statement "ssh-back passes the alias to ssh and does not reinterpret all OpenSSH options itself." refs SshConfigHost.alias,SshConfigHost.hostName,SshConfigHost.user,SshConfigHost.port
+  forbid SshConfigHost.no_credentials_from_config statement "Do not persist passwords, passphrases, private keys, or secret material from SSH config." refs SshConfigHost.alias,SshConfigHost.sourcePath
+  forbid SshConfigHost.no_hidden_config_state statement "Do not let menu labels be the only record of loaded SSH config hosts." refs SshConfigHost.alias,SshConfigHost.loadedAt
+
+field SshSessionFieldPromise for SshSession:
+  summary "Defines one managed SSH session and the explicit state needed for browser-login bridging."
+  field id type SessionID required true nullable false default null semantic "Unique identity for one managed SSH session." mutable false system true readers * writers system.startSession
+  field targetName type TargetName required true nullable false default null semantic "Target configuration used by this session." mutable false system false readers * writers system.startSession
+  field status type "enum(starting|control_ready|ready|closing|closed|failed)" required true nullable false default starting semantic "Lifecycle state for the managed SSH session." mutable true system true readers * writers system.startSession,system.markReady,system.closeSession
+  field localBridgePort type PortNumber required false nullable true default null semantic "Local ssh-back daemon port that receives browser-open requests through the remote-to-local control tunnel." mutable true system true readers * writers system.startSession
+  field remoteBridgePort type PortNumber required false nullable true default null semantic "Remote loopback port exposed on the development machine and forwarded to localBridgePort." mutable true system true readers * writers system.startSession
+  field controlTunnelId type TunnelID required false nullable true default null semantic "Tunnel that carries browser-open requests from the remote machine back to local ssh-back." mutable true system true readers * writers system.startSession,system.closeSession
+  field browserShimState type "enum(not_injected|injected|active|failed)" required true nullable false default not_injected semantic "Whether the remote environment has a Browser shim that forwards browser-open attempts to ssh-back." mutable true system true readers * writers system.injectBrowserShim,system.closeSession
+  field browserShimPath type RemotePath required false nullable true default null semantic "Remote path of the installed Browser shim under ~/.ssh-back." mutable true system true readers * writers system.injectBrowserShim,system.closeSession
+  field browserShimInstalledAt type datetime required false nullable true default null semantic "Time the Browser shim was installed on the remote machine." mutable true system true readers * writers system.injectBrowserShim
+  field browserEnvShell type string required false nullable true default null semantic "Detected remote default shell basename used to choose the Browser export rc file." mutable true system true readers * writers system.injectBrowserShim,system.closeSession
+  field browserEnvRcPath type RemotePath required false nullable true default null semantic "Remote shell rc file where ssh-back inspected or installed Browser environment configuration." mutable true system true readers * writers system.injectBrowserShim,system.closeSession
+  field startedAt type datetime required true nullable false default system-generated semantic "Time the SSH session startup began." mutable false system true readers * writers system.startSession
+  field endedAt type datetime required false nullable true default null semantic "Time the SSH session reached a terminal closed or failed state." mutable true system true readers * writers system.closeSession,system.failSession
+  field lastError type text required false nullable true default null semantic "Most recent human-readable failure reason for the session." mutable true system true readers * writers system.failSession
+  state starting meaning "ssh-back has started or is starting SSH and required setup." terminal false initial true transitions control_ready,ready,failed
+  state control_ready meaning "The remote-to-local control tunnel exists, but browser shim activation is not complete." terminal false initial false transitions ready,closing,failed
+  state ready meaning "SSH, the control tunnel, and the Browser shim are ready to handle remote browser-open requests." terminal false initial false transitions closing,failed
+  state closing meaning "ssh-back is intentionally closing the session and its tunnels." terminal false initial false transitions closed,failed
+  state closed meaning "The session and all owned tunnels were closed intentionally." terminal true initial false transitions -
+  state failed meaning "The session failed and cannot handle new browser-open requests." terminal true initial false transitions -
+  invariant SshSession.ready_requires_control_bridge statement "A ready session must have both bridge ports and the control tunnel recorded." refs SshSession.status,SshSession.localBridgePort,SshSession.remoteBridgePort,SshSession.controlTunnelId when "SshSession.status == SshSession.status.ready" must "SshSession.localBridgePort != null and SshSession.remoteBridgePort != null and SshSession.controlTunnelId != null"
+  invariant SshSession.ready_requires_installed_browser_shim statement "A ready session must have an installed Browser shim path, rc export path, detected shell, and timestamp." refs SshSession.status,SshSession.browserShimState,SshSession.browserShimPath,SshSession.browserShimInstalledAt,SshSession.browserEnvShell,SshSession.browserEnvRcPath when "SshSession.status == SshSession.status.ready" must "SshSession.browserShimPath != null and SshSession.browserShimInstalledAt != null and SshSession.browserEnvShell != null and SshSession.browserEnvRcPath != null"
+  invariant SshSession.closed_or_failed_requires_ended_at statement "A closed or failed session must record endedAt." refs SshSession.status,SshSession.endedAt when "SshSession.status in [SshSession.status.closed,SshSession.status.failed]" must "SshSession.endedAt != null"
+  constraint SshSession.one_active_session_per_target statement "Only one active managed session should own Browser shim state for the same target unless the user explicitly requests a separate session." refs SshSession.targetName,SshSession.status
+  constraint SshSession.browser_shim_matches_session statement "Browser shim activation belongs to the session that owns the control tunnel." refs SshSession.browserShimState,SshSession.controlTunnelId
+  constraint SshSession.browser_shim_lives_under_ssh_back statement "The installed Browser shim path must live under ~/.ssh-back on the remote machine." refs SshSession.browserShimPath
+  constraint SshSession.browser_shim_path_is_stable statement "The installed Browser shim path must be a stable ~/.ssh-back/browser path that can be overwritten when a new session chooses a new bridge port." refs SshSession.browserShimPath,SshSession.remoteBridgePort
+  constraint SshSession.browser_env_matches_default_shell statement "Browser environment configuration must be inspected in ~/.zshrc for zsh default shells or ~/.bashrc for bash default shells." refs SshSession.browserEnvShell,SshSession.browserEnvRcPath
+  constraint SshSession.browser_env_block_is_managed statement "ssh-back must update one bounded managed block when no user BROWSER export exists and must not append duplicate BROWSER exports when a user BROWSER export already exists." refs SshSession.browserEnvRcPath,SshSession.browserShimPath
+  forbid SshSession.no_untracked_ssh_process statement "Do not treat an unmanaged SSH process as a ready ssh-back session." refs SshSession.status,SshSession.controlTunnelId
+  forbid SshSession.no_implicit_browser_state statement "Do not infer Browser shim readiness from environment variables unless SshSession.browserShimState records it." refs SshSession.browserShimState
+  forbid SshSession.no_unbounded_shell_rc_rewrite statement "Do not rewrite unrelated shell rc content when installing the managed BROWSER export." refs SshSession.browserEnvRcPath
+
+field TunnelFieldPromise for Tunnel:
+  summary "Defines SSH tunnel records created and managed by ssh-back."
+  field id type TunnelID required true nullable false default null semantic "Unique identity for one SSH port forward." mutable false system true readers * writers system.createTunnel
+  field sessionId type SessionID required true nullable false default null semantic "Session that owns and must close this tunnel." mutable false system true readers * writers system.createTunnel
+  field direction type "enum(remote_to_local|local_to_remote)" required true nullable false default local_to_remote semantic "remote_to_local forwards a remote listener to local ssh-back; local_to_remote forwards a local listener to the remote development machine." mutable false system true readers * writers system.createTunnel
+  field purpose type "enum(control_bridge|callback_bridge)" required true nullable false default callback_bridge semantic "Reason the tunnel exists." mutable false system true readers * writers system.createTunnel
+  field localHost type string required true nullable false default 127.0.0.1 semantic "Local host bound or targeted by this tunnel." mutable false system true readers * writers system.createTunnel
+  field localPort type PortNumber required true nullable false default null semantic "Local TCP port for this tunnel." mutable false system true readers * writers system.createTunnel
+  field remoteHost type string required true nullable false default 127.0.0.1 semantic "Remote host bound or targeted by this tunnel." mutable false system true readers * writers system.createTunnel
+  field remotePort type PortNumber required true nullable false default null semantic "Remote TCP port for this tunnel." mutable false system true readers * writers system.createTunnel
+  field status type "enum(requested|opening|open|closing|closed|failed)" required true nullable false default requested semantic "Lifecycle state for this managed tunnel." mutable true system true readers * writers system.createTunnel,system.closeTunnel,system.failTunnel
+  field processId type integer required false nullable true default null semantic "Operating-system process identifier for the SSH process or tunnel process when available." mutable true system true readers * writers system.openTunnel,system.closeTunnel
+  field openedAt type datetime required false nullable true default null semantic "Time the tunnel became usable." mutable true system true readers * writers system.openTunnel
+  field closedAt type datetime required false nullable true default null semantic "Time the tunnel stopped intentionally." mutable true system true readers * writers system.closeTunnel
+  field lastError type text required false nullable true default null semantic "Most recent human-readable tunnel failure reason." mutable true system true readers * writers system.failTunnel
+  state requested meaning "ssh-back has decided that the tunnel is required." terminal false initial true transitions opening,failed
+  state opening meaning "ssh-back is starting the SSH forwarding process." terminal false initial false transitions open,failed
+  state open meaning "The tunnel is accepting traffic." terminal false initial false transitions closing,failed
+  state closing meaning "ssh-back is intentionally closing the tunnel." terminal false initial false transitions closed,failed
+  state closed meaning "The tunnel closed intentionally." terminal true initial false transitions -
+  state failed meaning "The tunnel failed and must not be used for new traffic." terminal true initial false transitions -
+  invariant Tunnel.open_requires_opened_at statement "An open tunnel must record when it became open." refs Tunnel.status,Tunnel.openedAt when "Tunnel.status == Tunnel.status.open" must "Tunnel.openedAt != null"
+  invariant Tunnel.closed_requires_closed_at statement "A closed tunnel must record closedAt." refs Tunnel.status,Tunnel.closedAt when "Tunnel.status == Tunnel.status.closed" must "Tunnel.closedAt != null"
+  constraint Tunnel.callback_bridge_is_local_to_remote statement "A callback_bridge tunnel forwards the user's local callback port to the remote development machine." refs Tunnel.direction,Tunnel.purpose,Tunnel.localPort,Tunnel.remotePort
+  constraint Tunnel.control_bridge_is_remote_to_local statement "A control_bridge tunnel forwards the remote Browser shim request port back to local ssh-back." refs Tunnel.direction,Tunnel.purpose,Tunnel.localPort,Tunnel.remotePort
+  forbid Tunnel.no_implicit_forward statement "Do not create or depend on an SSH port forward that has no Tunnel record." refs Tunnel.id,Tunnel.sessionId,Tunnel.direction,Tunnel.purpose
+  forbid Tunnel.no_public_callback_bind statement "Callback and control bridge listeners must not bind to a public interface unless a future Promise explicitly allows it." refs Tunnel.localHost,Tunnel.remoteHost
+
+field BrowserOpenRequestFieldPromise for BrowserOpenRequest:
+  summary "Defines a remote Browser shim request to open a URL in the local browser."
+  field id type BrowserRequestID required true nullable false default null semantic "Unique identity for one remote browser-open request." mutable false system true readers * writers system.receiveBrowserRequest
+  field sessionId type SessionID required true nullable false default null semantic "Ready SSH session that received this browser-open request." mutable false system true readers * writers system.receiveBrowserRequest
+  field url type UrlString required true nullable false default null semantic "URL supplied by the remote process through the Browser shim." mutable false system false readers * writers system.receiveBrowserRequest
+  field status type "enum(received|parsed|tunneled|opened|rejected|failed)" required true nullable false default received semantic "Lifecycle state for processing this browser-open request." mutable true system true readers * writers system.receiveBrowserRequest,system.resolveCallbackTunnel,system.launchBrowser
+  field callbackHost type string required false nullable true default null semantic "Loopback host extracted from the login callback or redirect URL." mutable true system true readers * writers system.resolveCallbackTunnel
+  field callbackPort type PortNumber required false nullable true default null semantic "TCP port extracted from the login callback or redirect URL and used for local-to-remote forwarding." mutable true system true readers * writers system.resolveCallbackTunnel
+  field callbackTunnelId type TunnelID required false nullable true default null semantic "Local-to-remote tunnel opened for callbackPort." mutable true system true readers * writers system.resolveCallbackTunnel
+  field receivedAt type datetime required true nullable false default system-generated semantic "Time ssh-back received the remote browser-open request." mutable false system true readers * writers system.receiveBrowserRequest
+  field openedAt type datetime required false nullable true default null semantic "Time ssh-back launched the local browser for this request." mutable true system true readers * writers system.launchBrowser
+  field rejectedReason type text required false nullable true default null semantic "Human-readable reason the request was rejected." mutable true system true readers * writers system.rejectBrowserRequest
+  state received meaning "ssh-back recorded the URL but has not yet parsed callback information." terminal false initial true transitions parsed,rejected,failed
+  state parsed meaning "ssh-back parsed a supported loopback callback host and port." terminal false initial false transitions tunneled,rejected,failed
+  state tunneled meaning "ssh-back opened the required callback tunnel." terminal false initial false transitions opened,failed
+  state opened meaning "ssh-back launched the local browser after the callback tunnel became available." terminal true initial false transitions -
+  state rejected meaning "ssh-back rejected the request without launching the browser." terminal true initial false transitions -
+  state failed meaning "ssh-back failed while processing the request." terminal true initial false transitions -
+  invariant BrowserOpenRequest.parsed_requires_callback_port statement "A parsed, tunneled, or opened request must have a callback port." refs BrowserOpenRequest.status,BrowserOpenRequest.callbackPort when "BrowserOpenRequest.status in [BrowserOpenRequest.status.parsed,BrowserOpenRequest.status.tunneled,BrowserOpenRequest.status.opened]" must "BrowserOpenRequest.callbackPort != null"
+  invariant BrowserOpenRequest.open_requires_callback_tunnel statement "An opened request must record the callback tunnel used before launch." refs BrowserOpenRequest.status,BrowserOpenRequest.callbackTunnelId,BrowserOpenRequest.openedAt when "BrowserOpenRequest.status == BrowserOpenRequest.status.opened" must "BrowserOpenRequest.callbackTunnelId != null and BrowserOpenRequest.openedAt != null"
+  constraint BrowserOpenRequest.callback_host_must_be_loopback statement "callbackHost must be loopback for automatic tunneling in the MVP." refs BrowserOpenRequest.callbackHost
+  constraint BrowserOpenRequest.one_callback_tunnel_per_request statement "A browser-open request owns at most one callback tunnel." refs BrowserOpenRequest.callbackTunnelId
+  forbid BrowserOpenRequest.no_browser_launch_without_record statement "Do not launch the local browser for a remote URL unless a BrowserOpenRequest exists." refs BrowserOpenRequest.id,BrowserOpenRequest.url
+  forbid BrowserOpenRequest.no_unvalidated_callback_port statement "Do not open a callback tunnel from a URL until callbackHost and callbackPort have been parsed and validated." refs BrowserOpenRequest.callbackHost,BrowserOpenRequest.callbackPort
+
+field BrowserOpenHookFieldPromise for BrowserOpenHook:
+  summary "Defines a hook that can inspect and allow or reject a browser-open request before local side effects."
+  field name type HookName required true nullable false default null semantic "Stable hook name shown in diagnostics and rejection messages." mutable false system false readers * writers system.registerHook
+  field enabled type boolean required true nullable false default true semantic "Whether the hook participates in browser-open evaluation." mutable true system true readers * writers system.registerHook,system.configureHook
+  field kind type "enum(confirm_browser_open|custom)" required true nullable false default custom semantic "Hook behavior category; confirm_browser_open asks the user before allowing local browser launch." mutable false system false readers * writers system.registerHook
+  field lastDecision type "enum(allow|deny|not_run)" required false nullable true default not_run semantic "Most recent decision returned by this hook for observability." mutable true system true readers * writers system.evaluateHook
+  invariant BrowserOpenHook.enabled_requires_name_and_kind statement "An enabled browser-open hook must have a name and kind." refs BrowserOpenHook.enabled,BrowserOpenHook.name,BrowserOpenHook.kind when "BrowserOpenHook.enabled == true" must "BrowserOpenHook.name != null and BrowserOpenHook.kind != null"
+  constraint BrowserOpenHook.confirm_hook_requires_user_decision statement "A confirm_browser_open hook must produce an explicit allow or deny decision before the request may continue." refs BrowserOpenHook.kind,BrowserOpenHook.lastDecision
+  constraint BrowserOpenHook.hooks_run_before_callback_tunnel statement "Enabled browser-open hooks run after callback parsing and before callback tunnel creation or local browser launch." refs BrowserOpenHook.enabled,BrowserOpenRequest.status,BrowserOpenRequest.callbackTunnelId
+  forbid BrowserOpenHook.no_hidden_allow statement "Do not treat a missing hook decision as permission to open the browser." refs BrowserOpenHook.enabled,BrowserOpenHook.lastDecision
+
+field MenuBarAppFieldPromise for MenuBarApp:
+  summary "Defines the macOS menu bar control surface for ssh-back."
+  field status type "enum(not_running|idle|connecting|connected|error)" required true nullable false default not_running semantic "Lifecycle state of the menu bar UI process from the user's perspective." mutable true system true readers * writers system.launchMenuBar,system.menuConnect,system.menuDisconnect,system.reportError
+  field visibleStatusItem type boolean required true nullable false default false semantic "Whether ssh-back has an active macOS status item in the system menu bar." mutable true system true readers * writers system.launchMenuBar,system.quitMenuBar
+  field activeSessionId type SessionID required false nullable true default null semantic "Session currently controlled by the menu bar surface." mutable true system true readers * writers system.menuConnect,system.menuDisconnect
+  field selectedTargetName type TargetName required false nullable true default null semantic "Target selected by the user from the menu bar surface for connection." mutable true system false readers * writers user.menuSelectTarget,system.menuConnect
+  field lastUserMessage type text required false nullable true default null semantic "Most recent status, error, or clipboard confirmation message shown by the menu bar app." mutable true system true readers * writers system.reportStatus,system.reportError
+  field launchedAt type datetime required false nullable true default null semantic "Time the menu bar app process became available to the user." mutable true system true readers * writers system.launchMenuBar
+  state not_running meaning "The menu bar app is not active." terminal false initial true transitions idle,error
+  state idle meaning "The status item exists and no managed session is active." terminal false initial false transitions connecting,error
+  state connecting meaning "The user requested a session and startup is in progress." terminal false initial false transitions connected,idle,error
+  state connected meaning "The menu bar app controls a ready managed SSH session." terminal false initial false transitions idle,error
+  state error meaning "The menu bar app encountered an error that must be visible to the user." terminal false initial false transitions idle,connecting
+  invariant MenuBarApp.idle_requires_no_active_session statement "An idle menu bar app must not point at an active session." refs MenuBarApp.status,MenuBarApp.activeSessionId when "MenuBarApp.status == MenuBarApp.status.idle" must "MenuBarApp.activeSessionId == null"
+  invariant MenuBarApp.connected_requires_active_session statement "A connected menu bar app must record the controlled SshSession." refs MenuBarApp.status,MenuBarApp.activeSessionId when "MenuBarApp.status == MenuBarApp.status.connected" must "MenuBarApp.activeSessionId != null"
+  invariant MenuBarApp.error_requires_message statement "An error state must expose a user-readable message." refs MenuBarApp.status,MenuBarApp.lastUserMessage when "MenuBarApp.status == MenuBarApp.status.error" must "MenuBarApp.lastUserMessage != null"
+  constraint MenuBarApp.primary_surface statement "The macOS status item is the primary control surface for starting, observing, and stopping ssh-back sessions." refs MenuBarApp.visibleStatusItem,MenuBarApp.status
+  constraint MenuBarApp.connected_status_item_uses_green_dot statement "When the menu bar app is connected, the visible macOS status item must use a green dot indicator." refs MenuBarApp.status,MenuBarApp.visibleStatusItem
+  forbid MenuBarApp.no_dock_window_required statement "Do not require a normal Dock window as the only way to control session startup, shim copying, or shutdown." refs MenuBarApp.visibleStatusItem
+  forbid MenuBarApp.no_hidden_ui_session_state statement "Do not infer active session state only from menu labels or AppKit object state." refs MenuBarApp.activeSessionId,MenuBarApp.status
+
+function LaunchMenuBarAppFunctionPromise action LaunchMenuBarApp:
+  summary "Starts the macOS menu bar UI and creates the status item."
+  depends MenuBarAppFieldPromise,SshConfigHostFieldPromise
+  trigger "The user launches the ssh-back macOS app."
+  reads -
+  writes MenuBarApp.status,MenuBarApp.visibleStatusItem,MenuBarApp.activeSessionId,MenuBarApp.lastUserMessage,MenuBarApp.launchedAt,SshConfigHost.alias,SshConfigHost.sourcePath,SshConfigHost.hostName,SshConfigHost.user,SshConfigHost.port,SshConfigHost.connectable,SshConfigHost.loadedAt
+  ensure LaunchMenuBarApp.creates_status_item statement "A successful launch creates a visible status item and enters idle state." refs MenuBarApp.visibleStatusItem,MenuBarApp.status
+  ensure LaunchMenuBarApp.no_active_session_on_launch statement "A fresh launch starts without an active session unless persisted session recovery is later added to the Promise." refs MenuBarApp.activeSessionId
+  ensure LaunchMenuBarApp.loads_ssh_config_hosts statement "A successful launch attempts to load selectable Host aliases from ~/.ssh/config." refs SshConfigHost.alias,SshConfigHost.sourcePath
+  sideeffect LaunchMenuBarApp.registers_appkit_status_item statement "The action registers a macOS AppKit status item and menu." refs MenuBarApp.visibleStatusItem
+  idempotency "Launching while already running must keep one status item and must not create duplicate menu bar icons."
+  forbid LaunchMenuBarApp.no_required_dock_window statement "The action must not require a normal Dock window for the primary workflow." refs MenuBarApp.visibleStatusItem
+
+function LoadSshConfigHostsFunctionPromise action LoadSshConfigHosts:
+  summary "Reads ~/.ssh/config and records selectable OpenSSH Host aliases."
+  depends SshConfigHostFieldPromise,MenuBarAppFieldPromise
+  trigger "The menu bar app launches or the user chooses Refresh SSH Config Hosts."
+  precondition LoadSshConfigHosts.path_allowed statement "The config path must be the user's OpenSSH client config path for the MVP." refs SshConfigHost.sourcePath
+  reads -
+  writes SshConfigHost.alias,SshConfigHost.sourcePath,SshConfigHost.hostName,SshConfigHost.user,SshConfigHost.port,SshConfigHost.connectable,SshConfigHost.loadedAt,MenuBarApp.lastUserMessage
+  ensure LoadSshConfigHosts.records_concrete_hosts statement "Concrete Host aliases from ~/.ssh/config are recorded as connectable SshConfigHost entries." refs SshConfigHost.alias,SshConfigHost.connectable,SshConfigHost.sourcePath
+  ensure LoadSshConfigHosts.skips_wildcards_for_connection statement "Wildcard Host patterns are not exposed as connectable menu targets." refs SshConfigHost.alias,SshConfigHost.connectable
+  reject LoadSshConfigHosts.rejects_unreadable_config statement "Unreadable config files produce an empty host list and a visible user message instead of crashing." refs SshConfigHost.sourcePath,MenuBarApp.lastUserMessage
+  sideeffect LoadSshConfigHosts.reads_local_ssh_config statement "The action reads the local filesystem path ~/.ssh/config." refs SshConfigHost.sourcePath
+  idempotency "Repeating the action replaces the loaded host list with the current file contents."
+  forbid LoadSshConfigHosts.no_secret_capture statement "The action must not capture IdentityFile contents, passwords, passphrases, or other secret material." refs SshConfigHost.sourcePath
+
+function MenuBarStartSessionFunctionPromise action MenuBarStartSession:
+  summary "Starts a managed session from the menu bar app for a user-entered SSH destination."
+  depends MenuBarAppFieldPromise,SshTargetFieldPromise,SshSessionFieldPromise,TunnelFieldPromise
+  trigger "The user chooses Connect from the macOS menu bar menu."
+  precondition MenuBarStartSession.menu_bar_ready statement "The menu bar app must be idle or in recoverable error state." refs MenuBarApp.status
+  precondition MenuBarStartSession.destination_present statement "The user must provide a non-empty SSH destination or target name." refs SshTarget.sshDestination,MenuBarApp.selectedTargetName
+  reads MenuBarApp.status,MenuBarApp.selectedTargetName,SshTarget.name,SshTarget.sshDestination,SshTarget.sshArgs
+  writes MenuBarApp.status,MenuBarApp.activeSessionId,MenuBarApp.selectedTargetName,MenuBarApp.lastUserMessage,SshSession.id,SshSession.targetName,SshSession.status,SshSession.localBridgePort,SshSession.remoteBridgePort,SshSession.controlTunnelId,SshSession.browserShimState,SshSession.browserShimPath,SshSession.browserShimInstalledAt,SshSession.browserEnvShell,SshSession.browserEnvRcPath,Tunnel.id,Tunnel.sessionId,Tunnel.direction,Tunnel.purpose,Tunnel.status
+  ensure MenuBarStartSession.connects_ready_session statement "A successful menu action records the ready SshSession as MenuBarApp.activeSessionId." refs MenuBarApp.status,MenuBarApp.activeSessionId,SshSession.status
+  reject MenuBarStartSession.rejects_empty_destination statement "The action rejects when no SSH destination or target name is supplied." refs SshTarget.sshDestination,MenuBarApp.selectedTargetName
+  reject MenuBarStartSession.rejects_active_session_conflict statement "The action rejects or asks for explicit disconnect when the menu bar app already controls an active session." refs MenuBarApp.activeSessionId,MenuBarApp.status
+  sideeffect MenuBarStartSession.starts_managed_session statement "The action invokes StartManagedSession for the selected target." refs SshSession.id,SshSession.status
+  idempotency "Repeated Connect actions for the same active session must not start duplicate SSH processes."
+  forbid MenuBarStartSession.no_silent_background_failure statement "Startup errors must update MenuBarApp.lastUserMessage and visible status instead of failing only in logs." refs MenuBarApp.status,MenuBarApp.lastUserMessage
+
+function MenuBarStartSshConfigHostFunctionPromise action MenuBarStartSshConfigHost:
+  summary "Starts a managed session from a Host alias loaded from ~/.ssh/config."
+  depends MenuBarAppFieldPromise,SshConfigHostFieldPromise,SshSessionFieldPromise,TunnelFieldPromise
+  trigger "The user chooses a concrete Host alias from the SSH Config Hosts menu."
+  precondition MenuBarStartSshConfigHost.menu_bar_ready statement "The menu bar app must be idle or in recoverable error state." refs MenuBarApp.status
+  precondition MenuBarStartSshConfigHost.host_connectable statement "The selected SshConfigHost must be connectable." refs SshConfigHost.alias,SshConfigHost.connectable
+  reads MenuBarApp.status,MenuBarApp.activeSessionId,SshConfigHost.alias,SshConfigHost.connectable,SshConfigHost.sourcePath
+  writes MenuBarApp.status,MenuBarApp.activeSessionId,MenuBarApp.selectedTargetName,MenuBarApp.lastUserMessage,SshSession.id,SshSession.targetName,SshSession.status,SshSession.localBridgePort,SshSession.remoteBridgePort,SshSession.controlTunnelId,SshSession.browserShimState,SshSession.browserShimPath,SshSession.browserShimInstalledAt,SshSession.browserEnvShell,SshSession.browserEnvRcPath,Tunnel.id,Tunnel.sessionId,Tunnel.direction,Tunnel.purpose,Tunnel.status
+  ensure MenuBarStartSshConfigHost.uses_host_alias statement "The action passes SshConfigHost.alias to ssh as the destination so OpenSSH resolves the full config." refs SshConfigHost.alias,SshSession.targetName
+  ensure MenuBarStartSshConfigHost.connects_ready_session statement "A successful menu action records the ready SshSession as MenuBarApp.activeSessionId." refs MenuBarApp.status,MenuBarApp.activeSessionId,SshSession.status
+  reject MenuBarStartSshConfigHost.rejects_wildcard_host statement "The action rejects non-connectable wildcard Host patterns." refs SshConfigHost.alias,SshConfigHost.connectable
+  reject MenuBarStartSshConfigHost.rejects_active_session_conflict statement "The action rejects or asks for explicit disconnect when the menu bar app already controls an active session." refs MenuBarApp.activeSessionId,MenuBarApp.status
+  sideeffect MenuBarStartSshConfigHost.starts_managed_session statement "The action invokes managed SSH startup using the selected Host alias." refs SshConfigHost.alias,SshSession.status
+  idempotency "Repeated selection for the same active host must not start duplicate SSH processes."
+  forbid MenuBarStartSshConfigHost.no_option_reinterpretation statement "The action must not reinterpret OpenSSH options beyond passing the selected alias to ssh." refs SshConfigHost.alias,SshConfigHost.hostName,SshConfigHost.user,SshConfigHost.port
+
+function CopyBrowserShimCommandFunctionPromise action CopyBrowserShimCommand:
+  summary "Copies a remote Browser shim command that sends browser-open URLs through the active control bridge."
+  depends MenuBarAppFieldPromise,SshSessionFieldPromise
+  trigger "The user chooses Copy Browser Shim from the menu bar menu."
+  precondition CopyBrowserShimCommand.session_connected statement "The menu bar app must control a ready SshSession with remoteBridgePort and browserShimPath." refs MenuBarApp.activeSessionId,SshSession.status,SshSession.remoteBridgePort,SshSession.browserShimPath
+  reads MenuBarApp.activeSessionId,SshSession.id,SshSession.status,SshSession.remoteBridgePort,SshSession.browserShimPath
+  writes MenuBarApp.lastUserMessage
+  ensure CopyBrowserShimCommand.uses_installed_remote_shim statement "The copied command exports BROWSER to the installed remote browserShimPath." refs SshSession.browserShimPath,SshSession.remoteBridgePort
+  reject CopyBrowserShimCommand.rejects_without_session statement "The action rejects when there is no active ready session." refs MenuBarApp.activeSessionId,SshSession.status
+  sideeffect CopyBrowserShimCommand.writes_clipboard statement "The action writes the shell command to the macOS clipboard." refs SshSession.remoteBridgePort,SshSession.browserShimPath
+  idempotency "Repeating the action replaces the clipboard with the same command for the same active session."
+  forbid CopyBrowserShimCommand.no_stale_bridge_port statement "The action must not copy a command from a closed, failed, or non-active session." refs MenuBarApp.activeSessionId,SshSession.status,SshSession.remoteBridgePort,SshSession.browserShimPath
+
+function BridgeTestEndpointFunctionPromise action BridgeTestEndpoint:
+  summary "Serves a manual test endpoint that proves the remote-to-local control bridge reaches local ssh-back."
+  depends SshSessionFieldPromise,TunnelFieldPromise,MenuBarAppFieldPromise
+  trigger "A user or remote shell requests GET /test through the remote bridge port."
+  precondition BridgeTestEndpoint.session_ready statement "A ready SshSession must own the control bridge." refs SshSession.status,SshSession.remoteBridgePort,SshSession.localBridgePort,SshSession.controlTunnelId
+  reads SshSession.id,SshSession.targetName,SshSession.status,SshSession.localBridgePort,SshSession.remoteBridgePort,SshSession.controlTunnelId,SshSession.browserShimPath,Tunnel.status,Tunnel.purpose,MenuBarApp.activeSessionId
+  writes MenuBarApp.lastUserMessage
+  ensure BridgeTestEndpoint.returns_status statement "A successful test response includes ok status, target name, and the remote bridge endpoint." refs SshSession.targetName,SshSession.remoteBridgePort
+  reject BridgeTestEndpoint.rejects_without_ready_session statement "The endpoint rejects when no ready active session exists." refs SshSession.status,MenuBarApp.activeSessionId
+  sideeffect BridgeTestEndpoint.http_response statement "The endpoint returns plain text suitable for curl from the remote shell." refs SshSession.remoteBridgePort
+  idempotency "Repeating GET /test is read-only except for the latest visible status message."
+  forbid BridgeTestEndpoint.no_browser_side_effects statement "The test endpoint must not create callback tunnels, browser-open requests, hooks, or local browser launches." refs BrowserOpenRequest.id,Tunnel.purpose
+
+function EvaluateBrowserOpenHooksFunctionPromise action EvaluateBrowserOpenHooks:
+  summary "Evaluates registered browser-open hooks before creating callback tunnels or launching the local browser."
+  depends BrowserOpenRequestFieldPromise,BrowserOpenHookFieldPromise,SshSessionFieldPromise,MenuBarAppFieldPromise
+  trigger "A BrowserOpenRequest has a parsed loopback callback host and port."
+  precondition EvaluateBrowserOpenHooks.request_parsed statement "The BrowserOpenRequest must have a parsed callbackHost and callbackPort." refs BrowserOpenRequest.status,BrowserOpenRequest.callbackHost,BrowserOpenRequest.callbackPort
+  reads BrowserOpenRequest.id,BrowserOpenRequest.url,BrowserOpenRequest.callbackHost,BrowserOpenRequest.callbackPort,SshSession.id,SshSession.targetName,BrowserOpenHook.name,BrowserOpenHook.enabled,BrowserOpenHook.kind
+  writes BrowserOpenRequest.status,BrowserOpenRequest.rejectedReason,BrowserOpenHook.lastDecision,MenuBarApp.lastUserMessage
+  ensure EvaluateBrowserOpenHooks.allow_continues statement "If every enabled hook allows the request, processing may continue to callback tunnel creation." refs BrowserOpenHook.lastDecision,BrowserOpenRequest.status
+  ensure EvaluateBrowserOpenHooks.deny_rejects statement "If any enabled hook denies the request, BrowserOpenRequest becomes rejected with a visible reason." refs BrowserOpenHook.lastDecision,BrowserOpenRequest.status,BrowserOpenRequest.rejectedReason,MenuBarApp.lastUserMessage
+  reject EvaluateBrowserOpenHooks.rejects_missing_decision statement "The action rejects when an enabled hook cannot produce an allow or deny decision." refs BrowserOpenHook.lastDecision
+  sideeffect EvaluateBrowserOpenHooks.confirm_browser_open statement "The confirm_browser_open hook asks the user to confirm the URL through the macOS menu bar process." refs BrowserOpenHook.kind,BrowserOpenRequest.url,MenuBarApp.visibleStatusItem
+  idempotency "Hook evaluation is request-scoped; repeating it for the same request must not create tunnels or launch browsers by itself."
+  forbid EvaluateBrowserOpenHooks.no_callback_tunnel_before_allow statement "The action must not create a callback_bridge Tunnel before enabled hooks allow the request." refs BrowserOpenRequest.callbackTunnelId,BrowserOpenHook.lastDecision
+  forbid EvaluateBrowserOpenHooks.no_browser_launch_before_allow statement "The action must not launch the local browser before enabled hooks allow the request." refs BrowserOpenRequest.status,BrowserOpenHook.lastDecision
+
+function StartManagedSessionFunctionPromise action StartManagedSession:
+  summary "Starts SSH for a target, creates the remote-to-local control tunnel, and injects the remote Browser shim."
+  depends SshTargetFieldPromise,SshSessionFieldPromise,TunnelFieldPromise
+  trigger "A user asks ssh-back to connect to a configured SSH target."
+  precondition StartManagedSession.target_exists statement "The requested SshTarget must exist and have an sshDestination." refs SshTarget.name,SshTarget.sshDestination
+  precondition StartManagedSession.no_active_conflict statement "The target must not already have an active managed session unless the user requested a separate session." refs SshSession.targetName,SshSession.status
+  reads SshTarget.name,SshTarget.sshDestination,SshTarget.sshArgs,SshTarget.defaultRemoteHost,SshSession.targetName,SshSession.status
+  writes SshSession.id,SshSession.targetName,SshSession.status,SshSession.localBridgePort,SshSession.remoteBridgePort,SshSession.controlTunnelId,SshSession.browserShimState,SshSession.browserShimPath,SshSession.browserShimInstalledAt,SshSession.browserEnvShell,SshSession.browserEnvRcPath,SshSession.startedAt,SshSession.lastError,Tunnel.id,Tunnel.sessionId,Tunnel.direction,Tunnel.purpose,Tunnel.localHost,Tunnel.localPort,Tunnel.remoteHost,Tunnel.remotePort,Tunnel.status,Tunnel.processId,Tunnel.openedAt,Tunnel.lastError
+  ensure StartManagedSession.creates_control_tunnel statement "A successful session has a remote_to_local control_bridge tunnel recorded and open." refs SshSession.controlTunnelId,Tunnel.direction,Tunnel.purpose,Tunnel.status
+  ensure StartManagedSession.activates_browser_shim statement "A successful session installs the Browser shim at stable path ~/.ssh-back/browser, installs a managed BROWSER export into the rc file for the detected default shell only when no user BROWSER export already exists, and records activation before status becomes ready." refs SshSession.status,SshSession.browserShimState,SshSession.browserShimPath,SshSession.browserShimInstalledAt,SshSession.browserEnvShell,SshSession.browserEnvRcPath
+  reject StartManagedSession.rejects_missing_target statement "The action rejects when the target is unknown or lacks sshDestination." refs SshTarget.name,SshTarget.sshDestination
+  reject StartManagedSession.rejects_conflicting_active_session statement "The action rejects or requires explicit separation when an active session already owns the same target." refs SshSession.targetName,SshSession.status
+  sideeffect StartManagedSession.starts_ssh statement "The action starts an SSH process with a remote-to-local tunnel for the control bridge." refs Tunnel.direction,Tunnel.purpose
+  sideeffect StartManagedSession.injects_browser_env statement "The action writes an executable Browser shim to ~/.ssh-back/browser, removes stale ssh-back managed export blocks, and appends an idempotent managed export block to ~/.zshrc or ~/.bashrc only when that rc file has no existing user BROWSER export." refs SshSession.browserShimState,SshSession.remoteBridgePort,SshSession.browserShimPath,SshSession.browserEnvShell,SshSession.browserEnvRcPath
+  idempotency "StartManagedSession is not idempotent unless a target-scoped active session reuse policy is explicitly selected by the caller."
+  forbid StartManagedSession.no_ready_without_control_bridge statement "The action must not set SshSession.status to ready without an open control_bridge tunnel and installed Browser shim." refs SshSession.status,SshSession.controlTunnelId,SshSession.browserShimPath,Tunnel.status
+  forbid StartManagedSession.no_credentials_in_target statement "The action must not persist SSH passwords, OAuth tokens, or browser cookies in SshTarget or SshSession." refs SshTarget.sshDestination,SshTarget.sshArgs,SshSession.lastError
+
+function ReceiveBrowserOpenRequestFunctionPromise action ReceiveBrowserOpenRequest:
+  summary "Receives a URL from the remote Browser shim through the control bridge and records it."
+  depends SshSessionFieldPromise,TunnelFieldPromise,BrowserOpenRequestFieldPromise
+  trigger "The remote Browser shim sends a browser-open URL to the local ssh-back daemon."
+  precondition ReceiveBrowserOpenRequest.session_ready statement "The owning SshSession must be ready." refs SshSession.status,SshSession.controlTunnelId
+  precondition ReceiveBrowserOpenRequest.url_present statement "The remote request must include a non-empty absolute URL." refs BrowserOpenRequest.url
+  reads SshSession.id,SshSession.status,SshSession.controlTunnelId,Tunnel.id,Tunnel.status
+  writes BrowserOpenRequest.id,BrowserOpenRequest.sessionId,BrowserOpenRequest.url,BrowserOpenRequest.status,BrowserOpenRequest.receivedAt,BrowserOpenRequest.rejectedReason
+  ensure ReceiveBrowserOpenRequest.records_request statement "A valid remote browser-open attempt is recorded with received status before further processing." refs BrowserOpenRequest.id,BrowserOpenRequest.status,BrowserOpenRequest.url
+  reject ReceiveBrowserOpenRequest.rejects_unready_session statement "The action rejects when the session is not ready." refs SshSession.status
+  reject ReceiveBrowserOpenRequest.rejects_empty_url statement "The action rejects empty or non-absolute URLs." refs BrowserOpenRequest.url
+  idempotency "Each received Browser shim call creates a separate BrowserOpenRequest unless a future request identity field is added."
+  forbid ReceiveBrowserOpenRequest.no_direct_browser_launch statement "Receiving a request must not launch the local browser before callback parsing and tunneling complete." refs BrowserOpenRequest.status
+
+function ResolveCallbackTunnelFunctionPromise action ResolveCallbackTunnel:
+  summary "Parses loopback callback information from a browser-open URL and opens the matching local-to-remote tunnel."
+  depends SshSessionFieldPromise,TunnelFieldPromise,BrowserOpenRequestFieldPromise
+  trigger "A BrowserOpenRequest is in received state."
+  precondition ResolveCallbackTunnel.request_received statement "The BrowserOpenRequest must be in received state." refs BrowserOpenRequest.status
+  precondition ResolveCallbackTunnel.session_ready statement "The owning SshSession must still be ready." refs SshSession.status
+  reads BrowserOpenRequest.id,BrowserOpenRequest.sessionId,BrowserOpenRequest.url,BrowserOpenRequest.status,SshSession.id,SshSession.targetName,SshSession.status
+  writes BrowserOpenRequest.status,BrowserOpenRequest.callbackHost,BrowserOpenRequest.callbackPort,BrowserOpenRequest.callbackTunnelId,BrowserOpenRequest.rejectedReason,Tunnel.id,Tunnel.sessionId,Tunnel.direction,Tunnel.purpose,Tunnel.localHost,Tunnel.localPort,Tunnel.remoteHost,Tunnel.remotePort,Tunnel.status,Tunnel.processId,Tunnel.openedAt,Tunnel.lastError
+  ensure ResolveCallbackTunnel.parses_loopback_callback statement "A supported request records callbackHost and callbackPort parsed from localhost, 127.0.0.1, or an equivalent loopback URL." refs BrowserOpenRequest.callbackHost,BrowserOpenRequest.callbackPort
+  ensure ResolveCallbackTunnel.opens_callback_tunnel statement "A supported request opens a local_to_remote callback_bridge tunnel for callbackPort before browser launch." refs BrowserOpenRequest.callbackPort,BrowserOpenRequest.callbackTunnelId,Tunnel.direction,Tunnel.purpose,Tunnel.status
+  reject ResolveCallbackTunnel.rejects_missing_callback statement "The action rejects when no supported loopback callback port can be found." refs BrowserOpenRequest.url,BrowserOpenRequest.rejectedReason
+  reject ResolveCallbackTunnel.rejects_non_loopback_callback statement "The action rejects callback hosts that are not loopback in the MVP." refs BrowserOpenRequest.callbackHost,BrowserOpenRequest.rejectedReason
+  reject ResolveCallbackTunnel.rejects_invalid_port statement "The action rejects missing, reserved, or invalid TCP ports." refs BrowserOpenRequest.callbackPort,BrowserOpenRequest.rejectedReason
+  sideeffect ResolveCallbackTunnel.starts_callback_ssh_tunnel statement "The action starts an SSH local-to-remote tunnel that forwards local callback traffic to the remote development machine." refs Tunnel.direction,Tunnel.purpose,Tunnel.localPort,Tunnel.remotePort
+  idempotency "Repeating ResolveCallbackTunnel for the same parsed request must reuse the recorded callbackTunnelId or reject; it must not create duplicate callback_bridge tunnels."
+  forbid ResolveCallbackTunnel.no_public_bind statement "The action must not bind callback tunnel listeners to public interfaces in the MVP." refs Tunnel.localHost,Tunnel.remoteHost
+  forbid ResolveCallbackTunnel.no_tunnel_without_request statement "The action must not create a callback_bridge tunnel without a recorded BrowserOpenRequest." refs BrowserOpenRequest.id,Tunnel.id
+
+function LaunchLocalBrowserFunctionPromise action LaunchLocalBrowser:
+  summary "Launches the local browser only after the callback tunnel for the remote login request is open."
+  depends BrowserOpenRequestFieldPromise,TunnelFieldPromise
+  trigger "A BrowserOpenRequest is in tunneled state with an open callback tunnel."
+  precondition LaunchLocalBrowser.request_tunneled statement "The request must have tunneled status." refs BrowserOpenRequest.status,BrowserOpenRequest.callbackTunnelId
+  precondition LaunchLocalBrowser.tunnel_open statement "The callback tunnel must be open." refs Tunnel.id,Tunnel.status
+  reads BrowserOpenRequest.id,BrowserOpenRequest.url,BrowserOpenRequest.status,BrowserOpenRequest.callbackTunnelId,Tunnel.id,Tunnel.status
+  writes BrowserOpenRequest.status,BrowserOpenRequest.openedAt,BrowserOpenRequest.rejectedReason
+  ensure LaunchLocalBrowser.opens_after_tunnel statement "A successful launch sets BrowserOpenRequest.status to opened and records openedAt." refs BrowserOpenRequest.status,BrowserOpenRequest.openedAt
+  reject LaunchLocalBrowser.rejects_missing_tunnel statement "The action rejects when no callbackTunnelId exists or the tunnel is not open." refs BrowserOpenRequest.callbackTunnelId,Tunnel.status
+  sideeffect LaunchLocalBrowser.launches_system_browser statement "The action asks the local operating system to open BrowserOpenRequest.url in the user's browser." refs BrowserOpenRequest.url
+  idempotency "A second launch for an already opened request must be an explicit no-op or rejection; it must not open extra callback tunnels."
+  forbid LaunchLocalBrowser.no_launch_before_tunnel statement "The action must not launch the browser while the request is received or parsed." refs BrowserOpenRequest.status,BrowserOpenRequest.callbackTunnelId
+
+function CloseManagedSessionFunctionPromise action CloseManagedSession:
+  summary "Closes a managed SSH session and every tunnel owned by that session."
+  depends SshSessionFieldPromise,TunnelFieldPromise
+  trigger "A user exits the session, the SSH process exits, or ssh-back is asked to clean up."
+  precondition CloseManagedSession.session_exists statement "The SshSession must exist." refs SshSession.id
+  reads SshSession.id,SshSession.status,Tunnel.id,Tunnel.sessionId,Tunnel.status
+  writes SshSession.status,SshSession.endedAt,SshSession.browserShimState,SshSession.browserShimPath,SshSession.browserEnvShell,SshSession.browserEnvRcPath,SshSession.lastError,Tunnel.status,Tunnel.closedAt,Tunnel.lastError
+  ensure CloseManagedSession.closes_owned_tunnels statement "Every non-terminal tunnel owned by the session reaches closed or failed." refs Tunnel.sessionId,Tunnel.status,Tunnel.closedAt
+  ensure CloseManagedSession.terminal_session statement "The session reaches closed or failed and records endedAt." refs SshSession.status,SshSession.endedAt
+  reject CloseManagedSession.rejects_missing_session statement "The action rejects when the session does not exist." refs SshSession.id
+  sideeffect CloseManagedSession.terminates_processes statement "The action terminates managed SSH tunnel processes that belong to the session." refs Tunnel.processId,Tunnel.sessionId
+  idempotency "Closing an already terminal session is an explicit no-op."
+  forbid CloseManagedSession.no_orphan_tunnels statement "The action must not leave an open Tunnel owned by a closed session." refs SshSession.status,Tunnel.sessionId,Tunnel.status
+
+verify MenuBarSurfaceVerification kind cross-cutting:
+  claim "The macOS menu bar app exposes the primary session workflow and keeps UI state mapped to declared session truth."
+  verifies MenuBarAppFieldPromise,LaunchMenuBarAppFunctionPromise,LoadSshConfigHostsFunctionPromise,MenuBarStartSessionFunctionPromise,MenuBarStartSshConfigHostFunctionPromise,CopyBrowserShimCommandFunctionPromise,BridgeTestEndpointFunctionPromise
+  methods unit,integration
+  scenario "Launch creates a single idle status item":
+    covers LaunchMenuBarAppFunctionPromise,MenuBarApp.idle_requires_no_active_session
+    given "The ssh-back app is not running."
+    when "LaunchMenuBarApp succeeds."
+    then "MenuBarApp.visibleStatusItem is true."
+    then "MenuBarApp.status is idle."
+    then "MenuBarApp.activeSessionId is null."
+    then "SSH config Host aliases are loaded or a visible empty-list message is recorded."
+    guard "Do not create duplicate status items for one process."
+  scenario "SSH config Host aliases are selectable":
+    covers LoadSshConfigHostsFunctionPromise,SshConfigHost.connectable_requires_alias
+    given "The user's ~/.ssh/config contains concrete Host aliases and wildcard Host patterns."
+    when "LoadSshConfigHosts succeeds."
+    then "Concrete Host aliases are visible as connectable menu targets."
+    then "Wildcard Host patterns are not exposed as connectable targets."
+    guard "Do not persist secrets or private key contents from SSH config."
+  scenario "Menu connect uses SSH config alias":
+    covers MenuBarStartSshConfigHostFunctionPromise,MenuBarStartSshConfigHost.uses_host_alias
+    given "The menu bar app is idle and the user selects a concrete SshConfigHost."
+    when "MenuBarStartSshConfigHost succeeds."
+    then "MenuBarApp.status is connected."
+    then "The macOS status item shows a green dot indicator."
+    then "SshSession.targetName equals the selected Host alias."
+    then "OpenSSH receives the alias as the ssh destination."
+    guard "Do not duplicate OpenSSH option resolution inside ssh-back."
+  scenario "Menu connect records the active session":
+    covers MenuBarStartSessionFunctionPromise,MenuBarApp.connected_requires_active_session
+    given "The menu bar app is idle and the user enters a valid SSH destination."
+    when "MenuBarStartSession succeeds."
+    then "MenuBarApp.status is connected."
+    then "The macOS status item shows a green dot indicator."
+    then "MenuBarApp.activeSessionId references the ready SshSession."
+    then "Startup failures are visible through MenuBarApp.lastUserMessage."
+    guard "Do not hide failed SSH startup only in stderr logs."
+  scenario "Copy Browser Shim uses the active bridge port":
+    covers CopyBrowserShimCommandFunctionPromise,CopyBrowserShimCommand.uses_installed_remote_shim
+    given "The menu bar app controls a ready session with remoteBridgePort."
+    when "CopyBrowserShimCommand succeeds."
+    then "The copied command exports BROWSER to the installed remote shim path."
+    then "MenuBarApp.lastUserMessage confirms the clipboard update."
+    guard "Do not copy a stale command for a closed or failed session."
+  scenario "Manual test endpoint proves control bridge reachability":
+    covers BridgeTestEndpointFunctionPromise,BridgeTestEndpoint.returns_status
+    given "The menu bar app controls a ready session with remoteBridgePort."
+    when "The user runs curl against http://127.0.0.1:<remoteBridgePort>/test from the remote shell."
+    then "The response is plain text and includes ssh-back test ok."
+    then "The response includes the target and remote bridge endpoint."
+    then "No BrowserOpenRequest or callback_bridge Tunnel is created."
+    guard "Do not require a real login URL just to verify the bridge."
+  evidence "Unit assertions over MenuBarApp state transitions."
+  evidence "Integration trace showing status item creation, connect action, and clipboard command generation."
+  evidence "Controller tests showing /test returns status without browser side effects."
+  evidence "Parser tests showing concrete Host aliases load while wildcard patterns are non-connectable."
+  fail "The app requires a Dock window for core session control."
+  fail "Menu labels imply a connection that MenuBarApp.activeSessionId does not record."
+  fail "A wildcard Host pattern can be selected as a concrete connection."
+
+verify SshConfigHostVerification kind function:
+  claim "SSH config loading records only safe connectable Host aliases and lets OpenSSH remain authoritative for connection details."
+  verifies SshConfigHostFieldPromise,LoadSshConfigHostsFunctionPromise,MenuBarStartSshConfigHostFunctionPromise,SshConfigHost.no_credentials_from_config
+  methods unit,integration
+  scenario "LoadSshConfigHosts parses concrete Host aliases":
+    covers LoadSshConfigHosts.records_concrete_hosts,SshConfigHost.connectable_requires_alias
+    given "~/.ssh/config contains Host devbox with HostName, User, and Port options."
+    when "LoadSshConfigHosts executes."
+    then "SshConfigHost.alias is devbox."
+    then "SshConfigHost.connectable is true."
+    then "SshConfigHost.hostName, user, and port are display context only."
+    guard "Do not require duplicate target creation for a concrete Host alias."
+  scenario "LoadSshConfigHosts keeps wildcard patterns non-connectable":
+    covers LoadSshConfigHosts.skips_wildcards_for_connection,SshConfigHost.no_wildcard_connection
+    given "~/.ssh/config contains Host * and Host internal-*."
+    when "LoadSshConfigHosts executes."
+    then "Wildcard patterns are not returned as connectable menu targets."
+    guard "Do not offer wildcard Host patterns as direct connection choices."
+  scenario "MenuBarStartSshConfigHost delegates option resolution to ssh":
+    covers MenuBarStartSshConfigHost.uses_host_alias,MenuBarStartSshConfigHost.no_option_reinterpretation
+    given "A connectable SshConfigHost alias exists."
+    when "MenuBarStartSshConfigHost starts a session."
+    then "ssh-back passes the alias to ssh."
+    then "ssh-back does not expand all OpenSSH options itself."
+    guard "Do not copy secret SSH config material into session state."
+  evidence "Unit tests over SSH config parser fixtures."
+  evidence "Controller tests showing selecting an SSH config Host starts a session using the alias."
+  fail "Host aliases are shown only as menu labels and not represented as SshConfigHost records."
+  fail "Wildcard Host patterns become connectable."
+  fail "ssh-back stores secret material read from SSH config."
+
+verify SessionStartupVerification kind function:
+  claim "A successful managed session has explicit SSH, control tunnel, and Browser shim readiness."
+  verifies StartManagedSessionFunctionPromise,SshSession.ready_requires_control_bridge,SshSession.ready_requires_installed_browser_shim,SshSession.no_untracked_ssh_process
+  methods unit,integration
+  scenario "StartManagedSession creates a ready bridge":
+    covers StartManagedSessionFunctionPromise,StartManagedSession.creates_control_tunnel,StartManagedSession.activates_browser_shim
+    given "A valid SshTarget exists and no active session owns that target."
+    when "StartManagedSession succeeds."
+    then "SshSession.status is ready."
+    then "SshSession.localBridgePort, remoteBridgePort, and controlTunnelId are set."
+    then "The control Tunnel has purpose control_bridge, direction remote_to_local, and status open."
+    then "SshSession.browserShimState is active."
+    then "SshSession.browserShimPath is ~/.ssh-back/browser."
+    then "SshSession.browserEnvShell is the detected remote default shell basename."
+    then "SshSession.browserEnvRcPath is ~/.zshrc for zsh or ~/.bashrc for bash."
+    then "If the selected rc file has no user BROWSER export, it contains exactly one ssh-back managed BROWSER export block."
+    then "If the selected rc file already has a user BROWSER export, ssh-back does not append a duplicate BROWSER export."
+    guard "Do not mark a session ready from an unmanaged SSH process."
+  evidence "Assertions over the persisted SshSession and control Tunnel records."
+  evidence "Assertions or integration traces showing the remote Browser shim file exists under ~/.ssh-back and is executable."
+  evidence "Assertions or integration traces showing the detected default shell selected the expected rc file and repeated installs do not duplicate the managed export block or an existing user BROWSER export."
+  evidence "A process or integration trace showing the Browser shim can reach the local ssh-back daemon through the control tunnel."
+  fail "SshSession.status is ready without an open control_bridge Tunnel."
+  fail "SshSession.status is ready without an installed Browser shim path."
+  fail "SshSession.status is ready without a managed shell rc export path."
+  fail "Browser shim activation is only implied by shell state and not recorded."
+
+verify BrowserLoginBridgeVerification kind cross-cutting:
+  claim "A remote browser-login URL with a loopback callback is tunneled before the local browser is launched."
+  verifies ReceiveBrowserOpenRequestFunctionPromise,EvaluateBrowserOpenHooksFunctionPromise,ResolveCallbackTunnelFunctionPromise,LaunchLocalBrowserFunctionPromise,BrowserOpenRequest.open_requires_callback_tunnel
+  methods unit,integration,e2e
+  scenario "Remote Browser shim opens a login URL with localhost callback":
+    covers ReceiveBrowserOpenRequestFunctionPromise,EvaluateBrowserOpenHooksFunctionPromise,ResolveCallbackTunnelFunctionPromise,LaunchLocalBrowserFunctionPromise
+    given "A ready SshSession exists with an open control_bridge Tunnel."
+    given "The remote Browser shim sends a URL that contains a loopback callback port."
+    given "The enabled browser-open hooks allow the request."
+    when "ssh-back receives and processes the BrowserOpenRequest."
+    then "A BrowserOpenRequest is recorded."
+    then "callbackHost and callbackPort are parsed from the URL."
+    then "Enabled browser-open hooks run before callback tunnel creation."
+    then "A local_to_remote callback_bridge Tunnel is open for callbackPort."
+    then "The local browser is launched only after the callback Tunnel is open."
+    guard "Do not launch the browser directly from ReceiveBrowserOpenRequest."
+  scenario "Confirm hook can reject a browser-open request":
+    covers EvaluateBrowserOpenHooksFunctionPromise,EvaluateBrowserOpenHooks.deny_rejects,EvaluateBrowserOpenHooks.no_callback_tunnel_before_allow
+    given "A ready SshSession receives a BrowserOpenRequest whose URL has a supported loopback callback port."
+    given "The confirm_browser_open hook denies the request."
+    when "EvaluateBrowserOpenHooks executes."
+    then "BrowserOpenRequest.status becomes rejected."
+    then "BrowserOpenRequest.rejectedReason is visible."
+    then "No callback_bridge Tunnel is created."
+    then "The local browser is not launched."
+    guard "Do not treat denial as a transport or SSH failure."
+  evidence "A test trace that orders received -> parsed -> tunneled -> opened."
+  evidence "A test trace that a denying confirm hook rejects before callback tunnel creation and browser launch."
+  evidence "Assertions that the callback Tunnel direction is local_to_remote and purpose is callback_bridge."
+  fail "The browser launches before callbackTunnelId exists."
+  fail "The callback port is parsed but no Tunnel record is created."
+  fail "A denied browser-open request creates a callback tunnel or launches a browser."
+
+verify TunnelBoundaryVerification kind function:
+  claim "ssh-back never creates hidden or public callback tunnels in the MVP."
+  verifies TunnelFieldPromise,ResolveCallbackTunnelFunctionPromise,Tunnel.no_implicit_forward,Tunnel.no_public_callback_bind
+  methods unit,integration
+  scenario "ResolveCallbackTunnel creates one declared callback tunnel":
+    covers ResolveCallbackTunnel.opens_callback_tunnel,Tunnel.no_implicit_forward
+    given "A BrowserOpenRequest has a supported loopback callback port."
+    when "ResolveCallbackTunnel succeeds."
+    then "Exactly one Tunnel is associated with the request."
+    then "The Tunnel direction is local_to_remote and purpose is callback_bridge."
+    then "The Tunnel localHost and remoteHost are loopback."
+    guard "Do not create additional untracked SSH -L processes."
+  evidence "Assertions over Tunnel records and process launch arguments."
+  fail "A callback SSH process starts without a Tunnel record."
+  fail "A tunnel binds to a non-loopback host."
+
+verify RejectionBoundaryVerification kind function:
+  claim "Unsupported browser-open requests are rejected without launching a browser or creating hidden tunnels."
+  verifies ReceiveBrowserOpenRequestFunctionPromise,ResolveCallbackTunnelFunctionPromise,LaunchLocalBrowserFunctionPromise,BrowserOpenRequest.no_unvalidated_callback_port
+  methods unit,integration
+  scenario "Request without supported callback is rejected":
+    covers ResolveCallbackTunnel.rejects_missing_callback,LaunchLocalBrowser.no_launch_before_tunnel
+    given "A ready SshSession receives a BrowserOpenRequest whose URL has no supported loopback callback port."
+    when "ResolveCallbackTunnel processes the request."
+    then "BrowserOpenRequest.status becomes rejected."
+    then "BrowserOpenRequest.rejectedReason is set."
+    then "No callback_bridge Tunnel is created."
+    then "The local browser is not launched."
+    guard "Do not treat absence of callbackPort as permission to launch directly."
+  scenario "Non-loopback callback is rejected":
+    covers ResolveCallbackTunnel.rejects_non_loopback_callback,ResolveCallbackTunnel.no_public_bind
+    given "A BrowserOpenRequest contains a callback host that is not loopback."
+    when "ResolveCallbackTunnel processes the request."
+    then "The request is rejected."
+    then "No tunnel binds to a public interface."
+    guard "Do not rewrite arbitrary public callback hosts into local tunnels."
+  evidence "Assertions that rejected requests do not produce browser launch side effects."
+  evidence "Assertions that rejected requests do not produce Tunnel records."
+  fail "A browser opens for a rejected request."
+  fail "A callback tunnel is created before callbackHost and callbackPort validation."
+
+verify ShutdownVerification kind cross-cutting:
+  claim "Closing a managed session closes all owned tunnels and leaves no session marked ready."
+  verifies CloseManagedSessionFunctionPromise,SshSession.closed_or_failed_requires_ended_at,CloseManagedSession.no_orphan_tunnels
+  methods unit,integration
+  scenario "CloseManagedSession closes the session and owned tunnels":
+    covers CloseManagedSessionFunctionPromise,CloseManagedSession.closes_owned_tunnels,CloseManagedSession.terminal_session
+    given "A ready SshSession owns one control_bridge Tunnel and one callback_bridge Tunnel."
+    when "CloseManagedSession succeeds."
+    then "SshSession.status is closed or failed."
+    then "SshSession.endedAt is set."
+    then "Every Tunnel owned by the session is closed or failed."
+    guard "Do not leave open callback tunnels after session shutdown."
+  evidence "Assertions over terminal SshSession and Tunnel records."
+  fail "A closed session still owns an open tunnel."
+  fail "A terminal session lacks endedAt."
