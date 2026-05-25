@@ -21,13 +21,17 @@ intent SshBackSystemIntent priority must:
   maps BrowserOpenRequestFieldPromise relation constrains note "Remote browser-open attempts become recorded requests before any browser launch."
   maps BrowserOpenHookFieldPromise relation constrains note "Browser-open hooks can intercept a request before local side effects."
   maps MenuBarAppFieldPromise relation constrains note "The macOS menu bar app is the primary user-facing control surface."
+  maps ReleaseBuildFieldPromise relation constrains note "Release builds are explicit artifacts produced from a tested source revision."
   maps StartManagedSessionFunctionPromise relation motivates note "Session startup creates the bridge needed by remote browser shims."
   maps ResolveCallbackTunnelFunctionPromise relation motivates note "Callback tunnel creation is the core automatic behavior."
   maps EvaluateBrowserOpenHooksFunctionPromise relation motivates note "Hook evaluation gates browser-open requests before callback tunneling and launch."
   maps BridgeTestEndpointFunctionPromise relation motivates note "A manual test endpoint proves the remote-to-local control bridge is reachable."
   maps LaunchMenuBarAppFunctionPromise relation motivates note "The menu bar process exposes the always-available local control surface."
   maps LoadSshConfigHostsFunctionPromise relation motivates note "Reading ~/.ssh/config populates selectable Host aliases."
+  maps PackageReleaseArtifactFunctionPromise relation motivates note "Packaging creates a distributable macOS app archive."
+  maps PublishGitHubReleaseFunctionPromise relation motivates note "GitHub tag releases publish the packaged app automatically."
   maps BrowserLoginBridgeVerification relation verifies note "The end-to-end login bridge proves the system intent."
+  maps ReleaseDeliveryVerification relation verifies note "Release automation proves the app can be built and published from CI."
 
 intent KeepSshStateExplicit priority must:
   statement "SSH process state, control bridge state, and browser shim state must be explicit session truth."
@@ -94,6 +98,17 @@ intent ConnectFromSshConfig priority must:
   maps MenuBarStartSshConfigHostFunctionPromise relation motivates
   maps SshConfigHostVerification relation verifies
 
+intent AutomateReleaseDelivery priority should:
+  statement "ssh-back should publish tested macOS app archives through GitHub Releases when a version tag is pushed."
+  rationale "Users need a repeatable downloadable build without requiring local Swift tooling or manual artifact upload."
+  status active
+  source "human prompt 2026-05-24"
+  parent SshBackSystemIntent relation refines note "Release automation is the delivery branch of the system-level intent."
+  maps ReleaseBuildFieldPromise relation constrains
+  maps PackageReleaseArtifactFunctionPromise relation motivates
+  maps PublishGitHubReleaseFunctionPromise relation motivates
+  maps ReleaseDeliveryVerification relation verifies
+
 type TargetName kind id base string:
   summary "Stable local name for an SSH target."
   format host-alias
@@ -138,6 +153,16 @@ type HookName kind id base string:
   summary "Stable name for a browser-open hook."
   format human-readable
   generated false
+
+type ReleaseVersion kind id base string:
+  summary "Version tag used to name a distributable ssh-back release."
+  format git-tag
+  generated false
+
+type ArtifactPath kind path base path:
+  summary "Filesystem path to a generated release artifact."
+  format local-path
+  generated true
 
 field SshTargetFieldPromise for SshTarget:
   summary "Defines SSH target configuration that ssh-back is allowed to manage."
@@ -286,6 +311,26 @@ field MenuBarAppFieldPromise for MenuBarApp:
   constraint MenuBarApp.connected_status_item_uses_green_dot statement "When the menu bar app is connected, the visible macOS status item must use a green dot indicator." refs MenuBarApp.status,MenuBarApp.visibleStatusItem
   forbid MenuBarApp.no_dock_window_required statement "Do not require a normal Dock window as the only way to control session startup, shim copying, or shutdown." refs MenuBarApp.visibleStatusItem
   forbid MenuBarApp.no_hidden_ui_session_state statement "Do not infer active session state only from menu labels or AppKit object state." refs MenuBarApp.activeSessionId,MenuBarApp.status
+
+field ReleaseBuildFieldPromise for ReleaseBuild:
+  summary "Defines a tested macOS release artifact produced for GitHub Release delivery."
+  field version type ReleaseVersion required true nullable false default null semantic "Git tag or explicit release version used in artifact names and release titles." mutable false system false readers * writers ci.release
+  field sourceCommit type string required true nullable false default null semantic "Git commit SHA used to build the release artifact." mutable false system true readers * writers ci.release
+  field status type "enum(requested|tested|packaged|published|failed)" required true nullable false default requested semantic "Lifecycle state for one release delivery run." mutable true system true readers * writers ci.release
+  field appBundlePath type ArtifactPath required false nullable true default null semantic "Path to the generated SSH Back.app bundle." mutable true system true readers * writers ci.package
+  field archivePath type ArtifactPath required false nullable true default null semantic "Path to the zip archive uploaded to GitHub Releases." mutable true system true readers * writers ci.package
+  field checksumPath type ArtifactPath required false nullable true default null semantic "Path to the SHA-256 checksum file uploaded with the archive." mutable true system true readers * writers ci.package
+  field builtAt type datetime required false nullable true default null semantic "Time the release artifact was packaged." mutable true system true readers * writers ci.package
+  state requested meaning "A release workflow has started but tests have not passed yet." terminal false initial true transitions tested,failed
+  state tested meaning "The Swift test suite passed for the source commit." terminal false initial false transitions packaged,failed
+  state packaged meaning "The app bundle, archive, and checksum exist locally." terminal false initial false transitions published,failed
+  state published meaning "The archive and checksum were uploaded to the GitHub Release." terminal true initial false transitions -
+  state failed meaning "The release workflow failed and must not be treated as a published build." terminal true initial false transitions -
+  invariant ReleaseBuild.packaged_requires_artifacts statement "A packaged or published release must record app bundle, archive, checksum, and builtAt." refs ReleaseBuild.status,ReleaseBuild.appBundlePath,ReleaseBuild.archivePath,ReleaseBuild.checksumPath,ReleaseBuild.builtAt when "ReleaseBuild.status in [ReleaseBuild.status.packaged,ReleaseBuild.status.published]" must "ReleaseBuild.appBundlePath != null and ReleaseBuild.archivePath != null and ReleaseBuild.checksumPath != null and ReleaseBuild.builtAt != null"
+  constraint ReleaseBuild.version_comes_from_tag_or_dispatch statement "Release version must come from a pushed version tag or an explicit workflow_dispatch input." refs ReleaseBuild.version
+  constraint ReleaseBuild.archive_contains_app_bundle statement "The release archive must contain the built SSH Back.app bundle as its top-level payload." refs ReleaseBuild.archivePath,ReleaseBuild.appBundlePath
+  forbid ReleaseBuild.no_publish_without_tests statement "Do not publish a GitHub Release artifact before the Swift test suite succeeds for the source commit." refs ReleaseBuild.status,ReleaseBuild.sourceCommit
+  forbid ReleaseBuild.no_unchecked_archive statement "Do not publish the app archive without a SHA-256 checksum artifact." refs ReleaseBuild.archivePath,ReleaseBuild.checksumPath
 
 function LaunchMenuBarAppFunctionPromise action LaunchMenuBarApp:
   summary "Starts the macOS menu bar UI and creates the status item."
@@ -463,6 +508,65 @@ function CloseManagedSessionFunctionPromise action CloseManagedSession:
   sideeffect CloseManagedSession.terminates_processes statement "The action terminates managed SSH tunnel processes that belong to the session." refs Tunnel.processId,Tunnel.sessionId
   idempotency "Closing an already terminal session is an explicit no-op."
   forbid CloseManagedSession.no_orphan_tunnels statement "The action must not leave an open Tunnel owned by a closed session." refs SshSession.status,Tunnel.sessionId,Tunnel.status
+
+function PackageReleaseArtifactFunctionPromise action PackageReleaseArtifact:
+  summary "Builds the release macOS app bundle and packages it as a zip archive with a SHA-256 checksum."
+  depends ReleaseBuildFieldPromise,MenuBarAppFieldPromise
+  trigger "A developer runs the release package script or the GitHub release workflow reaches packaging after tests pass."
+  precondition PackageReleaseArtifact.version_present statement "A release version or source commit identifier must be available for artifact naming." refs ReleaseBuild.version,ReleaseBuild.sourceCommit
+  reads ReleaseBuild.version,ReleaseBuild.sourceCommit,MenuBarApp.visibleStatusItem
+  writes ReleaseBuild.status,ReleaseBuild.appBundlePath,ReleaseBuild.archivePath,ReleaseBuild.checksumPath,ReleaseBuild.builtAt
+  ensure PackageReleaseArtifact.builds_app_bundle statement "The package action produces SSH Back.app using the release Swift build product." refs ReleaseBuild.appBundlePath
+  ensure PackageReleaseArtifact.creates_archive_and_checksum statement "The package action creates a zip archive and matching SHA-256 checksum file." refs ReleaseBuild.archivePath,ReleaseBuild.checksumPath
+  reject PackageReleaseArtifact.rejects_missing_app_bundle statement "The action fails if the app bundle is not produced before archive creation." refs ReleaseBuild.appBundlePath,ReleaseBuild.status
+  sideeffect PackageReleaseArtifact.runs_release_build statement "The action invokes the release app bundle build script and writes artifacts under the build output directory." refs ReleaseBuild.appBundlePath,ReleaseBuild.archivePath
+  idempotency "Repeating the package action for the same version replaces the local archive and checksum with the current build output."
+  forbid PackageReleaseArtifact.no_partial_success statement "The action must not report packaged status if either archive or checksum creation fails." refs ReleaseBuild.status,ReleaseBuild.archivePath,ReleaseBuild.checksumPath
+
+function PublishGitHubReleaseFunctionPromise action PublishGitHubRelease:
+  summary "Publishes a packaged ssh-back macOS archive to a GitHub Release."
+  depends ReleaseBuildFieldPromise
+  trigger "GitHub Actions runs on a pushed v* tag or manual workflow_dispatch release input."
+  precondition PublishGitHubRelease.tests_passed statement "The Swift test suite must succeed before packaging and publishing." refs ReleaseBuild.status,ReleaseBuild.sourceCommit
+  precondition PublishGitHubRelease.artifacts_packaged statement "The release archive and checksum must exist before upload." refs ReleaseBuild.archivePath,ReleaseBuild.checksumPath
+  reads ReleaseBuild.version,ReleaseBuild.sourceCommit,ReleaseBuild.status,ReleaseBuild.archivePath,ReleaseBuild.checksumPath
+  writes ReleaseBuild.status
+  ensure PublishGitHubRelease.uploads_assets statement "The GitHub Release contains the macOS zip archive and SHA-256 checksum." refs ReleaseBuild.version,ReleaseBuild.archivePath,ReleaseBuild.checksumPath
+  ensure PublishGitHubRelease.supports_rerun_upload statement "If the GitHub Release already exists, the workflow updates the archive and checksum assets for reruns." refs ReleaseBuild.version,ReleaseBuild.archivePath,ReleaseBuild.checksumPath
+  reject PublishGitHubRelease.rejects_missing_token statement "Publishing fails visibly when GitHub Actions lacks contents write permission or a GitHub token." refs ReleaseBuild.status
+  sideeffect PublishGitHubRelease.calls_github_releases statement "The action uses the GitHub Releases API through GitHub Actions credentials." refs ReleaseBuild.version
+  idempotency "A rerun for the same version may replace release assets, but it must not create a second release with a different version."
+  forbid PublishGitHubRelease.no_source_secret_archive statement "The release workflow must not upload SSH config files, credentials, local build databases, or source-control internals." refs ReleaseBuild.archivePath
+
+verify ReleaseDeliveryVerification kind cross-cutting:
+  claim "GitHub release automation builds a tested macOS app archive and publishes it with checksum assets."
+  verifies ReleaseBuildFieldPromise,PackageReleaseArtifactFunctionPromise,PublishGitHubReleaseFunctionPromise,ReleaseBuild.no_publish_without_tests
+  methods unit,integration
+  scenario "Local release package creates archive and checksum":
+    covers PackageReleaseArtifactFunctionPromise,PackageReleaseArtifact.creates_archive_and_checksum
+    given "The repository can build the ssh-back menu bar product."
+    when "PackageReleaseArtifact runs with a release version."
+    then "SSH Back.app exists."
+    then "A zip archive exists under the release artifact directory."
+    then "A SHA-256 checksum file exists beside the archive."
+    guard "Do not treat a missing checksum as a successful package."
+  scenario "Tag push publishes GitHub Release":
+    covers PublishGitHubReleaseFunctionPromise,PublishGitHubRelease.uploads_assets
+    given "A v* git tag is pushed to GitHub."
+    when "The release workflow runs on macOS."
+    then "The workflow runs swift test before packaging."
+    then "The workflow uploads the zip archive and checksum to the matching GitHub Release."
+    guard "Do not publish artifacts from an untested source commit."
+  scenario "Release workflow rerun updates existing assets":
+    covers PublishGitHubRelease.supports_rerun_upload
+    given "A GitHub Release already exists for the requested version."
+    when "The release workflow is rerun for that version."
+    then "The existing zip and checksum assets are replaced."
+    guard "Do not create a duplicate release for the same version."
+  evidence "Shell validation that the package script creates the expected archive and checksum paths."
+  evidence "GitHub Actions workflow that gates release publishing behind swift test."
+  fail "A GitHub Release can be created without running the Swift tests."
+  fail "The uploaded archive omits SSH Back.app or lacks a checksum."
 
 verify MenuBarSurfaceVerification kind cross-cutting:
   claim "The macOS menu bar app exposes the primary session workflow and keeps UI state mapped to declared session truth."

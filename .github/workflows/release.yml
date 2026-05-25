@@ -1,0 +1,98 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to publish, for example v0.1.0"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and publish macOS release
+    runs-on: macos-14
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve release tag
+        id: release_tag
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            tag="${{ inputs.tag }}"
+          else
+            tag="$GITHUB_REF_NAME"
+          fi
+
+          if [[ ! "$tag" =~ ^v[0-9]+(\.[0-9]+){0,2}([-.][A-Za-z0-9._-]+)?$ ]]; then
+            echo "Release tag must look like v0.1.0, got: $tag" >&2
+            exit 1
+          fi
+
+          echo "tag_name=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout requested tag
+        if: github.event_name == 'workflow_dispatch'
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ steps.release_tag.outputs.tag_name }}"
+
+          git fetch --tags --force
+          if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+            git checkout --detach "$tag"
+          else
+            echo "Tag $tag does not exist yet; the release will target the current workflow commit."
+          fi
+
+      - name: Run tests
+        run: swift test
+
+      - name: Package macOS app
+        id: package
+        env:
+          SSH_BACK_RELEASE_VERSION: ${{ steps.release_tag.outputs.tag_name }}
+        run: scripts/package-release.sh
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ssh-back-${{ steps.release_tag.outputs.tag_name }}-macos
+          path: |
+            ${{ steps.package.outputs.archive_path }}
+            ${{ steps.package.outputs.checksum_path }}
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          tag="${{ steps.release_tag.outputs.tag_name }}"
+          archive="${{ steps.package.outputs.archive_path }}"
+          checksum="${{ steps.package.outputs.checksum_path }}"
+          title="ssh-back $tag"
+          notes="Automated macOS build for $tag."
+
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" "$archive" "$checksum" --clobber
+          else
+            gh release create "$tag" "$archive" "$checksum" \
+              --title "$title" \
+              --notes "$notes" \
+              --target "$(git rev-parse HEAD)"
+          fi
