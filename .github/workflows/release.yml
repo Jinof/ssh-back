@@ -61,11 +61,67 @@ jobs:
       - name: Run tests
         run: swift test
 
+      - name: Import Developer ID certificate
+        env:
+          CERTIFICATE_P12_BASE64: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.MACOS_KEYCHAIN_PASSWORD }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ -z "$CERTIFICATE_P12_BASE64" ]]; then
+            echo "No Developer ID certificate configured; using ad-hoc signing."
+            exit 0
+          fi
+
+          if [[ -z "$CERTIFICATE_PASSWORD" || -z "$KEYCHAIN_PASSWORD" ]]; then
+            echo "MACOS_CERTIFICATE_PASSWORD and MACOS_KEYCHAIN_PASSWORD are required when importing a certificate." >&2
+            exit 1
+          fi
+
+          keychain_path="$RUNNER_TEMP/ssh-back-signing.keychain-db"
+          certificate_path="$RUNNER_TEMP/ssh-back-signing.p12"
+
+          printf '%s' "$CERTIFICATE_P12_BASE64" | base64 --decode > "$certificate_path"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$keychain_path"
+          security set-keychain-settings -lut 21600 "$keychain_path"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$keychain_path"
+          security import "$certificate_path" \
+            -P "$CERTIFICATE_PASSWORD" \
+            -A \
+            -t cert \
+            -f pkcs12 \
+            -k "$keychain_path"
+          security set-key-partition-list \
+            -S apple-tool:,apple:,codesign: \
+            -s \
+            -k "$KEYCHAIN_PASSWORD" \
+            "$keychain_path"
+          security list-keychains -d user -s "$keychain_path"
+          security find-identity -v -p codesigning "$keychain_path"
+
+          echo "SSH_BACK_KEYCHAIN_PATH=$keychain_path" >> "$GITHUB_ENV"
+
       - name: Package macOS app
         id: package
         env:
           SSH_BACK_RELEASE_VERSION: ${{ steps.release_tag.outputs.tag_name }}
+          SSH_BACK_CODESIGN_IDENTITY: ${{ secrets.MACOS_CODESIGN_IDENTITY }}
+          SSH_BACK_NOTARY_APPLE_ID: ${{ secrets.MACOS_NOTARY_APPLE_ID }}
+          SSH_BACK_NOTARY_TEAM_ID: ${{ secrets.MACOS_NOTARY_TEAM_ID }}
+          SSH_BACK_NOTARY_PASSWORD: ${{ secrets.MACOS_NOTARY_PASSWORD }}
         run: scripts/package-release.sh
+
+      - name: Delete signing keychain
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ -n "${SSH_BACK_KEYCHAIN_PATH:-}" ]]; then
+            security delete-keychain "$SSH_BACK_KEYCHAIN_PATH" || true
+          fi
 
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v4
@@ -86,9 +142,22 @@ jobs:
           archive="${{ steps.package.outputs.archive_path }}"
           checksum="${{ steps.package.outputs.checksum_path }}"
           title="ssh-back $tag"
-          notes="Automated macOS build for $tag."
+          notes="$(cat <<EOF
+          ssh-back $tag macOS 自动构建包。
+
+          未配置 Developer ID 签名和 Apple notarization secrets 时，此版本只做 ad-hoc 签名。
+          如果安装后 macOS 提示 "SSH Back.app" 已损坏，可以执行：
+
+          \`\`\`bash
+          xattr -dr com.apple.quarantine "/Applications/SSH Back.app"
+          \`\`\`
+
+          然后重新打开 app。
+          EOF
+          )"
 
           if gh release view "$tag" >/dev/null 2>&1; then
+            gh release edit "$tag" --title "$title" --notes "$notes"
             gh release upload "$tag" "$archive" "$checksum" --clobber
           else
             gh release create "$tag" "$archive" "$checksum" \

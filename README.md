@@ -43,7 +43,7 @@
 
 - **GitHub Release 自动构建**
   - 推送 `v*` tag 后 GitHub Actions 会在 macOS runner 上运行测试。
-  - 测试通过后打包 `SSH Back.app` 为 zip。
+  - 测试通过后签名并打包 `SSH Back.app` 为 zip。
   - 同时生成 `.sha256` checksum 并上传到 GitHub Release。
 
 ## 本地运行
@@ -83,6 +83,18 @@ SSH_BACK_RELEASE_VERSION=v0.1.0 scripts/package-release.sh
 - `ssh-back-v0.1.0-macos.zip`
 - `ssh-back-v0.1.0-macos.zip.sha256`
 
+## 下载后提示已损坏
+
+未配置 Developer ID 签名和 Apple notarization 时，Release 包只做 ad-hoc 签名。macOS 下载后可能因为 quarantine 隔离属性提示 `SSH Back.app` 已损坏。
+
+如果你已经把 app 放到 `/Applications`，可以执行：
+
+```bash
+xattr -dr com.apple.quarantine "/Applications/SSH Back.app"
+```
+
+然后重新打开 app。
+
 ## 发布 GitHub Release
 
 推送版本 tag：
@@ -94,8 +106,20 @@ git push origin main v0.1.0
 
 GitHub Actions 会自动创建或更新对应的 Release，并上传 macOS zip 和 checksum。
 
+### Release 签名和公证
+
+打包脚本默认会对 `.app` 做 ad-hoc 签名，避免 bundle 因签名不完整被 macOS 判定为“已损坏”。如果要让用户下载后无需手动移除 quarantine，需要在 GitHub Actions 配置 Developer ID 签名和 Apple notarization secrets：
+
+- `MACOS_CERTIFICATE_P12_BASE64`: Developer ID Application 证书 `.p12` 的 base64 内容。
+- `MACOS_CERTIFICATE_PASSWORD`: `.p12` 证书密码。
+- `MACOS_KEYCHAIN_PASSWORD`: CI 临时 keychain 密码。
+- `MACOS_CODESIGN_IDENTITY`: 证书身份名，例如 `Developer ID Application: Your Name (TEAMID)`。
+- `MACOS_NOTARY_APPLE_ID`: Apple ID。
+- `MACOS_NOTARY_TEAM_ID`: Apple Developer Team ID。
+- `MACOS_NOTARY_PASSWORD`: app-specific password 或 notarytool 可用密码。
+
 ## 当前边界
 
 - 目前目标平台是 macOS 13+。
-- 当前 Release 包未做代码签名和 notarization。
+- 本地打包未配置 Developer ID 时只做 ad-hoc 签名，用户仍可能需要通过右键打开或手动移除 quarantine。
 - callback 自动隧道只支持 loopback 地址，非 loopback callback 会被拒绝。
