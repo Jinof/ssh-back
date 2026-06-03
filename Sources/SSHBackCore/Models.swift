@@ -38,6 +38,8 @@ public enum TunnelStatus: String, Equatable {
 public enum BrowserOpenStatus: String, Equatable {
   case received
   case parsed
+  case pendingApproval = "pending_approval"
+  case approving
   case tunneled
   case opened
   case rejected
@@ -172,6 +174,7 @@ public struct Tunnel: Equatable {
 public struct BrowserOpenRequest: Equatable {
   public var id: String
   public var sessionId: String
+  public var targetName: String
   public var url: String
   public var status: BrowserOpenStatus
   public var callbackHost: String?
@@ -221,6 +224,8 @@ public enum SSHBackError: Error, LocalizedError {
   case serverNotReady
   case sshLaunchFailed(String)
   case browserOpenRejected(String)
+  case browserOpenRequestNotFound(String)
+  case browserOpenRequestNotPending(String)
 
   public var errorDescription: String? {
     switch self {
@@ -248,6 +253,10 @@ public enum SSHBackError: Error, LocalizedError {
       return message.isEmpty ? "Failed to launch ssh." : message
     case .browserOpenRejected(let message):
       return message.isEmpty ? "Browser open request was rejected." : message
+    case .browserOpenRequestNotFound(let id):
+      return "Browser open request was not found: \(id)"
+    case .browserOpenRequestNotPending(let id):
+      return "Browser open request is not waiting for approval: \(id)"
     }
   }
 }

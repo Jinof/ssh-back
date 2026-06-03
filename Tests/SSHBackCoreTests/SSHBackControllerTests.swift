@@ -23,6 +23,59 @@ final class SSHBackControllerTests: XCTestCase {
     XCTAssertEqual(snapshot.activeSession?.browserEnvRcPath, "~/.zshrc")
   }
 
+  func testStartSessionUsesExplicitRemoteAgentPort() throws {
+    let processManager = FakeProcessManager()
+    let controller = SSHBackController(processManager: processManager, sshConfigPath: missingTempConfigURL())
+
+    controller.launchMenuBarApp()
+    try controller.startSession(destination: "devbox", remoteAgentPort: 45123)
+    defer { controller.disconnect() }
+
+    let snapshot = controller.snapshot()
+    XCTAssertEqual(snapshot.activeSession?.remoteBridgePort, 45123)
+    XCTAssertEqual(processManager.controlTunnelRequests.first?.remotePort, 45123)
+    XCTAssertEqual(processManager.browserShimInstallRequests.first?.remoteBridgePort, 45123)
+  }
+
+  func testPreferredRemoteAgentPortAppliesToSshConfigHost() throws {
+    let configURL = try writeTempConfig("""
+    Host devbox
+      HostName dev.example.test
+    """)
+    let processManager = FakeProcessManager()
+    let controller = SSHBackController(processManager: processManager, sshConfigPath: configURL)
+
+    controller.launchMenuBarApp()
+    try controller.setPreferredRemoteAgentPort(45234)
+    try controller.startSshConfigHost(alias: "devbox")
+    defer { controller.disconnect() }
+
+    let snapshot = controller.snapshot()
+    XCTAssertEqual(controller.preferredRemoteAgentPort, 45234)
+    XCTAssertEqual(snapshot.activeSession?.remoteBridgePort, 45234)
+    XCTAssertEqual(processManager.controlTunnelRequests.first?.remotePort, 45234)
+    XCTAssertEqual(processManager.browserShimInstallRequests.first?.remoteBridgePort, 45234)
+  }
+
+  func testRejectsInvalidRemoteAgentPortBeforeStartingSession() throws {
+    let processManager = FakeProcessManager()
+    let controller = SSHBackController(processManager: processManager, sshConfigPath: missingTempConfigURL())
+
+    controller.launchMenuBarApp()
+
+    XCTAssertThrowsError(try controller.setPreferredRemoteAgentPort(80)) { error in
+      XCTAssertTrue(error.localizedDescription.contains("Invalid TCP port: 80"))
+    }
+    XCTAssertThrowsError(try controller.startSession(destination: "devbox", remoteAgentPort: 80)) { error in
+      XCTAssertTrue(error.localizedDescription.contains("Invalid TCP port: 80"))
+    }
+
+    let snapshot = controller.snapshot()
+    XCTAssertNil(snapshot.activeSession)
+    XCTAssertTrue(processManager.controlTunnelRequests.isEmpty)
+    XCTAssertTrue(processManager.browserShimInstallRequests.isEmpty)
+  }
+
   func testBrowserOpenCreatesCallbackTunnelBeforeOpen() throws {
     let processManager = FakeProcessManager()
     let controller = SSHBackController(processManager: processManager, sshConfigPath: missingTempConfigURL())
@@ -44,6 +97,86 @@ final class SSHBackControllerTests: XCTestCase {
     XCTAssertEqual(processManager.callbackTunnelRequests, [4999])
     XCTAssertTrue(snapshot.tunnels.contains { $0.purpose == .callbackBridge && $0.localPort == 4999 })
     XCTAssertEqual(snapshot.browserRequests.last?.status, .opened)
+  }
+
+  func testBrowserOpenQueuesPendingApprovalUntilApproved() throws {
+    let processManager = FakeProcessManager()
+    let controller = SSHBackController(processManager: processManager, sshConfigPath: missingTempConfigURL())
+    controller.requiresBrowserOpenApproval = true
+    var openedURL: URL?
+    controller.onOpenURL = { url in
+      openedURL = url
+      return true
+    }
+
+    controller.launchMenuBarApp()
+    try controller.startSession(destination: "devbox")
+    defer { controller.disconnect() }
+
+    let url = "https://login.example.test/start?redirect_uri=http%3A%2F%2Flocalhost%3A4999%2Fcallback"
+    let queuedRequest = try controller.processBrowserOpen(urlString: url)
+
+    var snapshot = controller.snapshot()
+    XCTAssertEqual(queuedRequest.status, .pendingApproval)
+    XCTAssertEqual(snapshot.browserRequests.last?.status, .pendingApproval)
+    XCTAssertNil(openedURL)
+    XCTAssertTrue(processManager.callbackTunnelRequests.isEmpty)
+    XCTAssertFalse(snapshot.tunnels.contains { $0.purpose == .callbackBridge })
+
+    let approvedURL = try controller.approveBrowserOpenRequest(id: queuedRequest.id)
+
+    snapshot = controller.snapshot()
+    XCTAssertEqual(approvedURL.absoluteString, url)
+    XCTAssertEqual(openedURL?.absoluteString, url)
+    XCTAssertEqual(processManager.callbackTunnelRequests, [4999])
+    XCTAssertTrue(snapshot.tunnels.contains { $0.purpose == .callbackBridge && $0.localPort == 4999 })
+    XCTAssertEqual(snapshot.browserRequests.last?.status, .opened)
+  }
+
+  func testBrowserOpenPendingApprovalCanBeRejected() throws {
+    let processManager = FakeProcessManager()
+    let controller = SSHBackController(processManager: processManager, sshConfigPath: missingTempConfigURL())
+    controller.requiresBrowserOpenApproval = true
+    controller.onOpenURL = { _ in
+      XCTFail("Rejected browser-open requests must not launch the browser.")
+      return true
+    }
+
+    controller.launchMenuBarApp()
+    try controller.startSession(destination: "devbox")
+    defer { controller.disconnect() }
+
+    let url = "https://login.example.test/start?redirect_uri=http%3A%2F%2Flocalhost%3A4999%2Fcallback"
+    let queuedRequest = try controller.processBrowserOpen(urlString: url)
+
+    try controller.rejectBrowserOpenRequest(id: queuedRequest.id, reason: "Denied in test.")
+
+    let snapshot = controller.snapshot()
+    XCTAssertTrue(processManager.callbackTunnelRequests.isEmpty)
+    XCTAssertEqual(snapshot.browserRequests.last?.status, .rejected)
+    XCTAssertEqual(snapshot.browserRequests.last?.rejectedReason, "Denied in test.")
+  }
+
+  func testHTTPBrowserOpenReturnsQueuedWhenApprovalIsRequired() throws {
+    let processManager = FakeProcessManager()
+    let controller = SSHBackController(processManager: processManager, sshConfigPath: missingTempConfigURL())
+    controller.requiresBrowserOpenApproval = true
+
+    controller.launchMenuBarApp()
+    try controller.startSession(destination: "devbox")
+    defer { controller.disconnect() }
+
+    let url = "https://login.example.test/start?redirect_uri=http%3A%2F%2Flocalhost%3A4999%2Fcallback"
+    var allowed = CharacterSet.urlQueryAllowed
+    allowed.remove(charactersIn: "&=?")
+    let encodedURL = try XCTUnwrap(url.addingPercentEncoding(withAllowedCharacters: allowed))
+    let response = controller.handleHTTPRoute("/open?url=\(encodedURL)")
+
+    let snapshot = controller.snapshot()
+    XCTAssertEqual(response.statusCode, 200)
+    XCTAssertEqual(response.body, "Queued for approval.")
+    XCTAssertEqual(snapshot.browserRequests.last?.status, .pendingApproval)
+    XCTAssertTrue(processManager.callbackTunnelRequests.isEmpty)
   }
 
   func testBrowserOpenHookDenialRejectsBeforeCallbackTunnelAndOpen() throws {

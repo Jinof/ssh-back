@@ -12,9 +12,28 @@ public final class SSHBackController {
   private var tunnelsById: [String: Tunnel] = [:]
   private var browserRequestsById: [String: BrowserOpenRequest] = [:]
   private var browserOpenHooks: [BrowserOpenHook] = []
+  private var browserOpenRequiresApproval = false
+  private var configuredRemoteAgentPort: Int?
 
   public var onStateChange: (() -> Void)?
   public var onOpenURL: ((URL) -> Bool)?
+  public var preferredRemoteAgentPort: Int? {
+    lock.lock()
+    defer { lock.unlock() }
+    return configuredRemoteAgentPort
+  }
+  public var requiresBrowserOpenApproval: Bool {
+    get {
+      lock.lock()
+      defer { lock.unlock() }
+      return browserOpenRequiresApproval
+    }
+    set {
+      lock.lock()
+      browserOpenRequiresApproval = newValue
+      lock.unlock()
+    }
+  }
 
   public init(
     processManager: SSHProcessManaging = SSHProcessManager(),
@@ -60,6 +79,22 @@ public final class SSHBackController {
     lock.unlock()
   }
 
+  public func setPreferredRemoteAgentPort(_ port: Int?) throws {
+    if let port, !CallbackParser.isSupportedCallbackPort(port) {
+      throw SSHBackError.invalidPort(port)
+    }
+
+    lock.lock()
+    configuredRemoteAgentPort = port
+    if let port {
+      menuBar.lastUserMessage = "Remote Agent port set to \(port)."
+    } else {
+      menuBar.lastUserMessage = "Remote Agent port set to automatic."
+    }
+    lock.unlock()
+    emitChange()
+  }
+
   @discardableResult
   public func loadSshConfigHosts() -> [SshConfigHost] {
     let displayPath = displayPath(for: sshConfigPath)
@@ -91,11 +126,13 @@ public final class SSHBackController {
     return hosts
   }
 
-  public func startSession(destination rawDestination: String) throws {
+  public func startSession(destination rawDestination: String, remoteAgentPort requestedRemoteAgentPort: Int? = nil) throws {
     let destination = rawDestination.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !destination.isEmpty else {
       throw SSHBackError.emptyDestination
     }
+
+    let remoteBridgePort = try resolveRemoteAgentPort(requestedRemoteAgentPort)
 
     lock.lock()
     if let session = activeSession, session.status == .ready || session.status == .starting || session.status == .controlReady {
@@ -113,7 +150,6 @@ public final class SSHBackController {
       self?.handleHTTPRoute(route) ?? .serverError("ssh-back is not available.")
     }
     let localBridgePort = Int(try server.start())
-    let remoteBridgePort = randomRemoteBridgePort()
     let sessionId = UUID().uuidString
     let controlTunnelId = UUID().uuidString
 
@@ -181,7 +217,7 @@ public final class SSHBackController {
     emitChange()
   }
 
-  public func startSshConfigHost(alias: String) throws {
+  public func startSshConfigHost(alias: String, remoteAgentPort requestedRemoteAgentPort: Int? = nil) throws {
     lock.lock()
     guard let host = sshConfigHosts.first(where: { $0.alias == alias }) else {
       lock.unlock()
@@ -194,7 +230,7 @@ public final class SSHBackController {
     }
     lock.unlock()
 
-    try startSession(destination: host.alias)
+    try startSession(destination: host.alias, remoteAgentPort: requestedRemoteAgentPort)
   }
 
   public func disconnect() {
@@ -212,6 +248,11 @@ public final class SSHBackController {
     for id in tunnelsById.keys {
       tunnelsById[id]?.status = .closed
       tunnelsById[id]?.closedAt = now
+    }
+
+    for id in browserRequestsById.keys where browserRequestsById[id]?.status == .pendingApproval {
+      browserRequestsById[id]?.status = .rejected
+      browserRequestsById[id]?.rejectedReason = "Disconnected before approval."
     }
 
     bridgeServer?.stop()
@@ -272,7 +313,8 @@ public final class SSHBackController {
     return command
   }
 
-  public func processBrowserOpen(urlString: String) throws -> URL {
+  @discardableResult
+  public func processBrowserOpen(urlString: String) throws -> BrowserOpenRequest {
     let trimmedURL = urlString.trimmingCharacters(in: .whitespacesAndNewlines)
     guard let browserURL = URL(string: trimmedURL), browserURL.scheme != nil else {
       throw SSHBackError.invalidBrowserURL(urlString)
@@ -288,6 +330,7 @@ public final class SSHBackController {
     var request = BrowserOpenRequest(
       id: requestId,
       sessionId: session.id,
+      targetName: session.targetName,
       url: trimmedURL,
       status: .received,
       callbackHost: nil,
@@ -322,27 +365,144 @@ public final class SSHBackController {
     )
     try evaluateBrowserOpenHooks(hookContext, requestId: requestId)
 
-    let tunnel = try ensureCallbackTunnel(session: session, port: endpoint.port)
-    request.status = .tunneled
-    request.callbackTunnelId = tunnel.id
+    lock.lock()
+    let requiresApproval = browserOpenRequiresApproval
+    lock.unlock()
 
-    let didOpen = onOpenURL?(browserURL) ?? false
-    if didOpen {
-      request.status = .opened
-      request.openedAt = Date()
-      menuBar.lastUserMessage = "Opened browser URL through callback port \(endpoint.port)."
-    } else {
-      request.status = .failed
-      request.rejectedReason = "The local browser did not accept the URL."
-      menuBar.status = .error
-      menuBar.lastUserMessage = request.rejectedReason
+    if requiresApproval {
+      request.status = .pendingApproval
+      lock.lock()
+      browserRequestsById[requestId] = request
+      menuBar.lastUserMessage = "Browser open request is waiting for approval."
+      lock.unlock()
+      emitChange()
+      return request
+    }
+
+    return try openBrowserRequest(
+      requestId: requestId,
+      session: session,
+      browserURL: browserURL,
+      callbackPort: endpoint.port
+    )
+  }
+
+  @discardableResult
+  public func approveBrowserOpenRequest(id requestId: String) throws -> URL {
+    lock.lock()
+    guard let request = browserRequestsById[requestId] else {
+      lock.unlock()
+      throw SSHBackError.browserOpenRequestNotFound(requestId)
+    }
+
+    guard request.status == .pendingApproval else {
+      lock.unlock()
+      throw SSHBackError.browserOpenRequestNotPending(requestId)
+    }
+
+    guard
+      let session = activeSession,
+      session.status == .ready,
+      session.id == request.sessionId,
+      let callbackPort = request.callbackPort
+    else {
+      lock.unlock()
+      throw SSHBackError.sessionNotReady
+    }
+
+    browserRequestsById[requestId]?.status = .approving
+    menuBar.lastUserMessage = "Approving browser open request..."
+    lock.unlock()
+    emitChange()
+
+    guard let browserURL = URL(string: request.url), browserURL.scheme != nil else {
+      throw SSHBackError.invalidBrowserURL(request.url)
+    }
+
+    _ = try openBrowserRequest(
+      requestId: requestId,
+      session: session,
+      browserURL: browserURL,
+      callbackPort: callbackPort
+    )
+    return browserURL
+  }
+
+  public func rejectBrowserOpenRequest(id requestId: String, reason: String = "Browser open request was denied by the user.") throws {
+    lock.lock()
+    guard let request = browserRequestsById[requestId] else {
+      lock.unlock()
+      throw SSHBackError.browserOpenRequestNotFound(requestId)
+    }
+
+    guard request.status == .pendingApproval else {
+      lock.unlock()
+      throw SSHBackError.browserOpenRequestNotPending(requestId)
+    }
+
+    browserRequestsById[request.id]?.status = .rejected
+    browserRequestsById[request.id]?.rejectedReason = reason
+    menuBar.lastUserMessage = reason
+    lock.unlock()
+    emitChange()
+  }
+
+  private func openBrowserRequest(
+    requestId: String,
+    session: SshSession,
+    browserURL: URL,
+    callbackPort: Int
+  ) throws -> BrowserOpenRequest {
+    let tunnel: Tunnel
+    do {
+      tunnel = try ensureCallbackTunnel(session: session, port: callbackPort)
+    } catch {
+      fail(requestId: requestId, reason: error.localizedDescription)
+      throw error
     }
 
     lock.lock()
-    browserRequestsById[requestId] = request
+    var request = browserRequestsById[requestId]
+    request?.status = .tunneled
+    request?.callbackTunnelId = tunnel.id
+    if let request {
+      browserRequestsById[requestId] = request
+    }
     lock.unlock()
     emitChange()
-    return browserURL
+
+    let didOpen = onOpenURL?(browserURL) ?? false
+    lock.lock()
+    request = browserRequestsById[requestId]
+    if didOpen {
+      request?.status = .opened
+      request?.openedAt = Date()
+      menuBar.lastUserMessage = "Opened browser URL through callback port \(callbackPort)."
+    } else {
+      request?.status = .failed
+      request?.rejectedReason = "The local browser did not accept the URL."
+      menuBar.status = .error
+      menuBar.lastUserMessage = request?.rejectedReason
+    }
+
+    if let request {
+      browserRequestsById[requestId] = request
+    }
+    lock.unlock()
+    emitChange()
+    return request ?? BrowserOpenRequest(
+      id: requestId,
+      sessionId: session.id,
+      targetName: session.targetName,
+      url: browserURL.absoluteString,
+      status: didOpen ? .opened : .failed,
+      callbackHost: nil,
+      callbackPort: callbackPort,
+      callbackTunnelId: tunnel.id,
+      receivedAt: Date(),
+      openedAt: didOpen ? Date() : nil,
+      rejectedReason: didOpen ? nil : "The local browser did not accept the URL."
+    )
   }
 
   public func handleHTTPRoute(_ route: String) -> BridgeHTTPResponse {
@@ -373,8 +533,17 @@ public final class SSHBackController {
     }
 
     do {
-      _ = try processBrowserOpen(urlString: urlString)
-      return .ok("Opened.")
+      let request = try processBrowserOpen(urlString: urlString)
+      switch request.status {
+      case .pendingApproval:
+        return .ok("Queued for approval.")
+      case .opened:
+        return .ok("Opened.")
+      case .failed:
+        return .badRequest(request.rejectedReason ?? "Failed to open browser URL.")
+      default:
+        return .ok("Received.")
+      }
     } catch {
       return .badRequest(error.localizedDescription)
     }
@@ -461,6 +630,16 @@ public final class SSHBackController {
     emitChange()
   }
 
+  private func fail(requestId: String, reason: String) {
+    lock.lock()
+    browserRequestsById[requestId]?.status = .failed
+    browserRequestsById[requestId]?.rejectedReason = reason
+    menuBar.status = .error
+    menuBar.lastUserMessage = reason
+    lock.unlock()
+    emitChange()
+  }
+
   private func evaluateBrowserOpenHooks(
     _ context: BrowserOpenHookContext,
     requestId: String
@@ -512,6 +691,18 @@ public final class SSHBackController {
 
   private func randomRemoteBridgePort() -> Int {
     Int.random(in: 41000...60999)
+  }
+
+  private func resolveRemoteAgentPort(_ requestedRemoteAgentPort: Int?) throws -> Int {
+    lock.lock()
+    let configuredPort = configuredRemoteAgentPort
+    lock.unlock()
+
+    let port = requestedRemoteAgentPort ?? configuredPort ?? randomRemoteBridgePort()
+    guard CallbackParser.isSupportedCallbackPort(port) else {
+      throw SSHBackError.invalidPort(port)
+    }
+    return port
   }
 
   private func displayPath(for url: URL) -> String {

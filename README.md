@@ -19,6 +19,7 @@
 - **自动启动 SSH 控制隧道**
   - 连接后创建远端到本机的 control bridge。
   - 远端 Browser shim 通过这个 bridge 把浏览器打开请求发回本机。
+  - Remote Agent 端口默认自动随机选择，也可以在菜单里固定为自定义端口。
 
 - **自动注入 Browser shim**
   - shim 安装到远端 `~/.ssh-back/browser`。
@@ -32,9 +33,10 @@
   - 打开本机浏览器前，先建立本机到远端的 callback tunnel。
 
 - **浏览器打开确认 Hook**
-  - 内置确认 hook。
-  - 每次远端请求打开本机浏览器前，用户可以选择允许或取消。
-  - 用户取消时不会创建 callback tunnel，也不会打开浏览器。
+  - 菜单里提供 Browser Requests 列表。
+  - 每次远端请求打开本机浏览器前，先进入待审批列表，用户可以选择 Approve 或 Deny。
+  - 用户未审批或拒绝时不会创建 callback tunnel，也不会打开浏览器。
+  - 菜单里保留最近的跳转请求记录，可以查看状态、callback 和复制 URL。
 
 - **手动联通性验证**
   - 菜单提供 `Copy Test Command`。
